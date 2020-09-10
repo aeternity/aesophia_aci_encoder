@@ -1,0 +1,18 @@
+{application, aesophia_aci_encoder,
+ [{description, "Contract ACI Encoder for Sophia Smart Contracts"},
+  {vsn, "0.0.1"},
+  {registered, []},
+  {applications,
+   [kernel,
+    stdlib,
+    jsx,
+    syntax_tools,
+    aebytecode
+   ]},
+  {env,[]},
+  {modules, []},
+  {maintainers, []},
+  {licenses, []},
+  {links, []}
+ ]}.
+
