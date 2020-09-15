@@ -9,35 +9,69 @@
 -module(aeaci_aci).
 
 %% API
--export([file/1, lex_string/1]).
+-export([file/1, encode_call_data/2]).
 
--record(scope, { functions :: #{ binary() => {[binary()], binary()} }
-               , types :: #{ binary() => term() }
+-include("aeaci_ast.hrl").
+
+-type aci_typedef() ::
+    int
+    | bool
+    | {bytes, integer()}
+    | bits %% It is impossible for a user to construct a literal of this type but leave it here just in case
+    | string
+    | char
+    | address
+    | contract
+    | oracle_query_id
+    | unbound_var
+    | oracle_id
+    | {list, aci_typedef()}
+    | {map, aci_typedef(), aci_typedef()}
+    | {tuple, [aci_typedef()]}
+    | {variant, [{string(), [aci_typedef()]}]}
+    | {record, [#{string() => aci_typedef()}]}.
+
+-type json_type() :: #{ binary() => term() } | binary().
+
+-record(scope, { functions :: #{ binary() => {[aci_typedef()], aci_typedef()} }
+               , typedefs :: #{ binary() => {json_type(), [binary()]} }
+               , is_contract :: boolean()
                }).
 %% Data type for encoding/decoding call data for a contract using the provided ACI
--record(contract_aci, { scopes :: #{ binary() => #scope{} }, opts :: map() }).
+-record(contract_aci, { scopes :: #{ binary() => #scope{} }, main_contract :: binary(), opts :: map() }).
 
 -spec file(string()) -> #contract_aci{}.
 file(Filename) ->
-  file(Filename, []).
+  file(Filename, #{backend => fate, compiler_version => v4_3_1}).
 
 file(Filename, Opts) ->
     {ok, JText} = file:read_file(Filename),
     Contracts =
-              case jsx:decode(JText, [{labels, atom}, return_maps]) of
+              case jsx:decode(JText, [{labels, binary}, return_maps]) of
                   JArray when is_list(JArray)  -> JArray;
                   JObject when is_map(JObject) -> [JObject];
                   _                            -> error(bad_aci_json)
               end,
-    Scopes = [parse_contract(Contract) || Contract <- Contracts],
-    #contract_aci{scopes = maps:from_list([S || S <- Scopes, is_tuple(S)]), opts = Opts}.
+    Scopes1 = [parse_contract(Contract) || Contract <- Contracts],
+    Scopes2 = [S || S <- Scopes1, is_tuple(S)],
+    {Default, _} = lists:last(Scopes2),
+    Env1 = maps:from_list(Scopes2),
+    Env2 = maps:map(
+        fun(ScopeName, {Scope, FoldedFuns}) ->
+            Scope#scope{functions = maps:map(
+                fun(_, FBody) -> unfold_types_in_function(Env1, ScopeName, FBody)
+                end, FoldedFuns)}
+        end, Env1),
+    #contract_aci{scopes = Env2, main_contract = Default, opts = Opts}.
 
-parse_contract(#{contract := #{name := ScopeName, functions := F0, type_defs := T0} = C}) ->
-    MkTDef = fun(N, T) -> #{name => N, vars => [], typedef => T} end,
-    T1 = [ MkTDef(<<"state">>, maps:get(state, C)) || maps:is_key(state, C) ] ++
-         [ MkTDef(<<"event">>, maps:get(event, C)) || maps:is_key(event, C) ] ++ T0,
-    ScopeTypes = [{TypeName, TypeDef} || #{name := TypeName, typedef := TypeDef} <- T1],
-    F1 = [{Name, {[ArgType || #{type := ArgType} <- Args, is_binary(ArgType)], Type}} || #{arguments := Args, name := Name, returns := Type} <- F0, is_binary(Type)],
+parse_contract(#{<<"contract">> := #{<<"name">> := ScopeName, <<"functions">> := F0, <<"type_defs">> := T0} = C}) ->
+    MkTDef = fun(N, T) -> #{<<"name">> => N, <<"vars">> => [], <<"typedef">> => T} end,
+    T1 = [ MkTDef(<<"state">>, maps:get(<<"state">>, C)) || maps:is_key(<<"state">>, C) ] ++
+         [ MkTDef(<<"event">>, maps:get(<<"event">>, C)) || maps:is_key(<<"event">>, C) ] ++ T0,
+    ScopeTypes = [
+        {TypeName, {TypeDef, [V || #{<<"name">> := V} <- TypeVars]}}
+        || #{<<"name">> := TypeName, <<"typedef">> := TypeDef, <<"vars">> := TypeVars} <- T1],
+    F1 = [{Name, {[ArgType || #{<<"type">> := ArgType} <- Args], Type}} || #{<<"arguments">> := Args, <<"name">> := Name, <<"returns">> := Type} <- F0],
     F2 = maps:from_list(F1),
     %% Insert default init constructor
     F3 = case maps:is_key(<<"init">>, F2) of
@@ -46,266 +80,113 @@ parse_contract(#{contract := #{name := ScopeName, functions := F0, type_defs := 
            false ->
                maps:put(<<"init">>, {[], <<"unit">>}, F2)
          end,
-    {ScopeName, #scope{types = maps:from_list(ScopeTypes), functions = F3}};
-parse_contract(#{namespace := #{name := ScopeName, type_defs := Ts}}) when Ts /= [] ->
-    ScopeTypes = [{TypeName, TypeDef} || #{name := TypeName, typedef := TypeDef} <- Ts],
-    {ScopeName, #scope{types = maps:from_list(ScopeTypes), functions = maps:new()}};
-parse_contract(#{namespace := _}) ->
+    {ScopeName, {#scope{typedefs = maps:from_list(ScopeTypes), functions = #{}, is_contract = true}, F3}};
+parse_contract(#{<<"namespace">> := #{<<"name">> := ScopeName, <<"type_defs">> := Ts}}) when Ts /= [] ->
+    ScopeTypes = [{TypeName, {TypeDef, [V || #{<<"name">> := V} <- TypeVars]}} || #{<<"name">> := TypeName, <<"typedef">> := TypeDef, <<"vars">> := TypeVars} <- Ts],
+    {ScopeName, {#scope{typedefs = maps:from_list(ScopeTypes), functions = #{}, is_contract = false}, #{}}};
+parse_contract(#{<<"namespace">> := _}) ->
     skip.
 
-%% To simplify expression parsing lex the string
-%% This is not the FULL Sophia lexer - It's a simpler variant designed
-%% for call data encoding/decoding
-%% This library should avoid linking with aesophia... Don't reuse the existing erlang
-%% Sophia lexer or parser which are unbelievably slow.
--spec lex_string(string()) -> {error, term()} | [
-    paren_start
-    | paren_end
-    | list_start
-    | list_end
-    | record_start
-    | record_end
-    | minus_sign
-    | {con, string()}
-    | {id, string()}
-    | {string, string()}
-    | {char, char()}
-    | {int, integer()}
-    | {hex, integer()}
-    | {bytes, binary()}
-    | dot
-    | comma
-    | equal
-].
-%% TODO: Nice error messsages :P
-lex_string(String) ->
-  skip_whitespace(String, [], []).
+unfold_types_in_function(Env, ScopeName, {FArgs, FRet}) ->
+    {[unfold_type(Env, ScopeName, T) || T <- FArgs], unfold_type(Env, ScopeName, FRet)}.
 
--define(IS_FORBIDDEN_CHAR(CHAR), (CHAR =:= $\n)).
--define(IS_FORBIDDEN_OP(CHAR), (
-    CHAR =:= $!
-    orelse CHAR =:= $<
-    orelse CHAR =:= $>
-    orelse CHAR =:= $+
-    orelse CHAR =:= $*
-    orelse CHAR =:= $/
-    orelse CHAR =:= $:
-    orelse CHAR =:= $&
-    orelse CHAR =:= $|
-    orelse CHAR =:= $?
-    orelse CHAR =:= $~
-    orelse CHAR =:= $@
-    orelse CHAR =:= $^
-  )).
--define(IS_WS(CHAR), (CHAR >= 0 andalso CHAR =< $ )).
--define(IS_DIGIT(CHAR), (CHAR >= $0 andalso CHAR =< $9)).
--define(IS_HEXDIGIT(CHAR), (
-    ?IS_DIGIT(CHAR)
-    orelse (CHAR >= $a andalso CHAR =< $f)
-    orelse (CHAR >= $A andalso CHAR =< $F))).
--define(IS_LOWER(CHAR), ((CHAR >= $a andalso CHAR =< $z) orelse CHAR =:= $_)).
--define(IS_UPPER(CHAR), (CHAR >= $A andalso CHAR =< $Z)).
--define(IS_CON(CHAR), ?IS_UPPER(CHAR); ?IS_LOWER(CHAR); ?IS_DIGIT(CHAR); CHAR =:= $_).
--define(IS_ID(CHAR), ?IS_CON(CHAR); CHAR =:= $').
-
-%% Skips whitespaces
-skip_whitespace([], Stack, Acc) ->
-    lex_string_(dispatch, [], Stack, Acc);
-skip_whitespace([Char | _], _Stack, _Acc) when ?IS_FORBIDDEN_CHAR(Char) ->
-    {error, forbidden_char};
-skip_whitespace([Char | String], Stack, Acc) when ?IS_WS(Char) ->
-    skip_whitespace(String, Stack, Acc);
-skip_whitespace(String, Stack, Acc) ->
-    lex_string_(dispatch, String, Stack, Acc).
-
-%% Just hardcode a state machine :)
-%% States: dispatch, comment, string, char, int, hex, bytes, id, con
-
-%% Forbidden chars in a one line call expression - forbid them - there is no place for them
-%% when encoding call data
-lex_string_(_, [Char | _], _Stack, _Acc) when ?IS_FORBIDDEN_CHAR(Char) ->
-    {error, forbidden_char};
-
-%% Dispatch lexing operation
-lex_string_(dispatch, [], [], Acc) -> %% Lexing done
-    lists:reverse(Acc);
-lex_string_(dispatch, [], _Stack, _Acc) -> %% Unmatched parantheses/braces/etc...
-    {error, unmatched_parantheses};
-%% Parantheses
-lex_string_(dispatch, [$( | String], Stack, Acc) ->
-    skip_whitespace(String, [paren_start | Stack], [paren_start | Acc]);
-lex_string_(dispatch, [$) | String], [paren_start | Stack], Acc) ->
-    skip_whitespace(String, Stack, [paren_end | Acc]);
-lex_string_(dispatch, [$) | _], _Stack, _Acc) ->
-    {error, unmatched_parantheses};
-%% Lists
-lex_string_(dispatch, [$[ | String], Stack, Acc) ->
-    skip_whitespace(String, [list_start | Stack], [list_start | Acc]);
-lex_string_(dispatch, [$] | String], [list_start | Stack], Acc) ->
-    skip_whitespace(String, Stack, [list_end | Acc]);
-lex_string_(dispatch, [$] | _], _Stack, _Acc) ->
-    {error, unmatched_list};
-%% Records/Maps
-lex_string_(dispatch, [${ | String], Stack, Acc) ->
-    skip_whitespace(String, [record_start | Stack], [record_start | Acc]);
-lex_string_(dispatch, [$} | String], [record_start | Stack], Acc) ->
-    skip_whitespace(String, Stack, [record_end | Acc]);
-lex_string_(dispatch, [$} | _], _Stack, _Acc) ->
-    {error, unmatched_record};
-%% Comment start
-lex_string_(dispatch, [$/, $/ | _], _Stack, _Acc) ->
-    {error, forbidden_comment};
-lex_string_(dispatch, [$/, $* | String], Stack, Acc) ->
-    lex_string_(comment, String, Stack, Acc);
-%% Lambdas
-lex_string_(dispatch, [$=, $> | _], _Stack, _Acc) ->
-    {error, forbidden_lambda};
-%% Expr
-lex_string_(dispatch, [$- | String], Stack, Acc) ->
-    skip_whitespace(String, Stack, [minus_sign | Acc]);
-lex_string_(dispatch, [$. | String], Stack, [{con, _} | _] = Acc) ->
-    skip_whitespace(String, Stack, [dot | Acc]);
-lex_string_(dispatch, [$. | _], _Stack, _Acc) ->
-    {error, forbidden_expr};
-lex_string_(dispatch, [$, | _], _Stack, [Top | _]) when Top =:= dot; Top =:= comma ->
-    {error, forbidden_expr};
-lex_string_(dispatch, [$, | String], Stack, Acc) ->
-    skip_whitespace(String, Stack, [comma | Acc]);
-lex_string_(dispatch, [$= | String], Stack, [{id, _} | _] = Acc) ->
-    skip_whitespace(String, Stack, [equal | Acc]);
-lex_string_(dispatch, [$= | String], Stack, [list_end | _] = Acc) ->
-    skip_whitespace(String, Stack, [equal | Acc]);
-lex_string_(dispatch, [$= | _], _Stack, _Acc) ->
-    {error, forbidden_expr};
-lex_string_(dispatch, [Char | _], _Stack, _Acc) when ?IS_FORBIDDEN_OP(Char) ->
-    {error, forbidden_expr};
-%% Hex
-lex_string_(dispatch, [$0, $x | [Char | _] = String], Stack, Acc) when ?IS_HEXDIGIT(Char) ->
-    lex_string_(hex, String, Stack, [{hex, 0} |  Acc]);
-%% Integer
-lex_string_(dispatch, [Char | _] = String, Stack, Acc) when ?IS_DIGIT(Char) ->
-    lex_string_(int, String, Stack, [{int, 0} | Acc]);
-%% Bytes
-lex_string_(dispatch, [$# | [Char | _] = String], Stack, Acc) when ?IS_HEXDIGIT(Char) ->
-    lex_string_(bytes, String, Stack, [{int, 0, 0} | Acc]);
-%% Con
-lex_string_(dispatch, [Char | String], Stack, Acc) when ?IS_UPPER(Char) ->
-    lex_string_(con, String, Stack, [{con, [Char]} | Acc]);
-%% Id
-lex_string_(dispatch, [Char | String], Stack, Acc) when ?IS_LOWER(Char) ->
-    lex_string_(id, String, Stack, [{id, [Char]} | Acc]);
-%% String
-lex_string_(dispatch, [$" | String], Stack, Acc) ->
-    lex_string_(string, String, Stack, [{string, []} | Acc]);
-%% Char
-lex_string_(dispatch, [$' | String], Stack, Acc) ->
-    lex_string_(char, String, Stack, Acc);
-
-%% Comment handling
-lex_string_(comment, [$*, $/ | String], Stack, Acc) ->
-    skip_whitespace(String, Stack, Acc);
-lex_string_(comment, [_ | String], Stack, Acc) ->
-    lex_string_(comment, String, Stack, Acc);
-
-%% Integer handling
-lex_string_(int, [Char | String], Stack, [{int, Val}|Acc]) when ?IS_DIGIT(Char) ->
-    lex_string_(int, String, Stack, [{int, Val*10 + Char - $0} | Acc]);
-lex_string_(int, [$_ | [Char | _] = String], Stack, Acc) when ?IS_DIGIT(Char) ->
-    lex_string_(int, String, Stack, Acc);
-lex_string_(int, [$_ | _], _Stack, _Acc) ->
-    {error, wrong_number};
-lex_string_(int, String, Stack, [{int, Val}, minus_sign | Acc]) ->
-    skip_whitespace(String, Stack, [{int, -Val} | Acc]);
-lex_string_(int, String, Stack, Acc) ->
-    skip_whitespace(String, Stack, Acc);
-
-%% Hex handling
-lex_string_(hex, [Char | String], Stack, [{hex, Val}|Acc]) when ?IS_HEXDIGIT(Char) ->
-    lex_string_(hex, String, Stack, [{hex, Val*16 + hex_char_to_val(Char)} | Acc]);
-lex_string_(hex, [$_ | [Char | _] = String], Stack, Acc) when ?IS_HEXDIGIT(Char) ->
-    lex_string_(hex, String, Stack, Acc);
-lex_string_(hex, [$_ | _], _Stack, _Acc) ->
-    {error, wrong_number};
-lex_string_(hex, String, Stack, [{hex, Val}, minus_sign | Acc]) ->
-    skip_whitespace(String, Stack, [{hex, -Val} | Acc]);
-lex_string_(hex, String, Stack, Acc) ->
-    skip_whitespace(String, Stack, Acc);
-
-%% Bytes handling
-lex_string_(bytes, [Char | String], Stack, [{int, Val, Len} | Acc]) when ?IS_HEXDIGIT(Char) ->
-    lex_string_(bytes, String, Stack, [{int, Val*16 + hex_char_to_val(Char), Len + 1} | Acc]);
-lex_string_(bytes, [$_ | [Char | _] = String], Stack, Acc) when ?IS_HEXDIGIT(Char) ->
-    lex_string_(hex, String, Stack, Acc);
-lex_string_(bytes, [$_ | _], _Stack, _Acc) ->
-    {error, wrong_number};
-lex_string_(bytes, String, Stack, [{int, Val, Len} | Acc]) ->
-    Digits = (Len + 1) div 2,
-    skip_whitespace(String, Stack, [{bytes, <<Val:Digits/unit:8>>} | Acc]);
-
-%% Con
-lex_string_(con, [Char | String], Stack, [{con, Con} | Acc]) when ?IS_CON(Char) ->
-    lex_string_(con, String, Stack, [{con, [Char | Con]} | Acc]);
-lex_string_(con, String, Stack, [{con, Con} | Acc]) ->
-    skip_whitespace(String, Stack, [{con, lists:reverse(Con)} | Acc]);
-
-%% Id
-lex_string_(id, [Char | String], Stack, [{id, Id} | Acc]) when ?IS_ID(Char) ->
-    lex_string_(id, String, Stack, [{id, [Char | Id]} | Acc]);
-lex_string_(id, String, Stack, [{id, Id} | Acc]) ->
-    skip_whitespace(String, Stack, [{id, lists:reverse(Id)} | Acc]);
-
-%% String
-lex_string_(string, [$" | String], Stack, [{string, S} | Acc]) ->
-    skip_whitespace(String, Stack, [{string, lists:reverse(S)} | Acc]);
-lex_string_(string, [$\\, $x, D1, D2 | String], Stack, [{string, S} | Acc]) ->
-    C = list_to_integer([D1, D2], 16),
-    lex_string_(string, String, Stack, [{string, [C | S]} | Acc]);
-lex_string_(string, [$\\, Code | String], Stack, [{string, S} | Acc]) ->
-    Char = case Code of
-        $'  -> $';
-        $\\ -> $\\;
-        $b  -> $\b;
-        $e  -> $\e;
-        $f  -> $\f;
-        $n  -> $\n;
-        $r  -> $\r;
-        $t  -> $\t;
-        $v  -> $\v;
-        _   -> {error, bad_char}
-    end,
-    case Char of
-        {error, _} = Err ->
-            Err;
-        _ ->
-            lex_string_(string, String, Stack, [{string, [Char | S]} | Acc])
+-spec unfold_type(#{binary() => {#scope{}, #{ binary() => {[json_type()], json_type()}}}}, binary(), json_type()) -> aci_typedef().
+unfold_type(Env, ScopeName, TypeName) when is_binary(TypeName) ->
+    io:format("ZZZZ: Scope: ~p ~p\n", [ScopeName, TypeName]),
+    [First | _] = binary_to_list(TypeName),
+    case binary:split(TypeName, <<".">>) of
+        [<<"unit">>] -> {tuple, []};
+        [<<"int">>] -> int;
+        [<<"signature">>] -> {bytes, 64};
+        [<<"hash">>] -> {bytes, 32};
+        [<<"address">>] -> address;
+        [<<"bits">>] -> bits;
+        [<<"string">>] -> string;
+        [<<"char">>] -> char;
+        [<<"bool">>] -> bool;
+        [_] when First =:= $' ->
+            unbound_var;
+        [_] when First >= $a andalso First =< $z ->
+            {#scope{typedefs = Typedefs}, _} = maps:get(ScopeName, Env),
+            %% If we have a non empty var list then the ACI is broken
+            ResolvedType = maps:get(TypeName, Typedefs),
+            unfold_type(Env, ScopeName, do_type_substitution(ResolvedType, []));
+        [_] ->
+            %% Remote contract
+            {#scope{is_contract = true}, _} = maps:get(TypeName, Env),
+            contract;
+        [<<"Chain">>, <<"ttl">>] ->
+            todo;
+        [Namespace, Typename] -> unfold_type(Env, Namespace, Typename)
     end;
-lex_string_(string, [Char | String], Stack, [{string, S} | Acc]) ->
-    lex_string_(string, String, Stack, [{string, [Char | S]} | Acc]);
+unfold_type(Env, ScopeName, TypeDef) when is_map(TypeDef), 1 =:= map_size(TypeDef) ->
+    [{TypeName, JSONTypeArgs}] = maps:to_list(TypeDef),
+    io:format("AAAA: Scope: ~p ~p ~p\n", [ScopeName, TypeName, JSONTypeArgs]),
+    case TypeName of
+        <<"map">> ->
+            [KT, VT] = JSONTypeArgs,
+            {map, unfold_type(Env, ScopeName, KT), unfold_type(Env, ScopeName, VT)};
+        <<"variant">> ->
+            todo;
+        <<"record">> ->
+            {record, maps:from_list([{KeyName, unfold_type(Env, ScopeName, KeyType)} || #{<<"name">> := KeyName, <<"type">> := KeyType} <- JSONTypeArgs])};
+        <<"bytes">> ->
+            {bytes, JSONTypeArgs};
+        <<"list">> ->
+            [T] = JSONTypeArgs,
+            {list, unfold_type(Env, ScopeName, T)};
+        <<"oracle_query">> ->
+            oracle_query_id;
+        <<"oracle">> ->
+            oracle_id;
+        <<"option">> ->
+            [T1] = JSONTypeArgs,
+            T2 = unfold_type(Env, ScopeName, T1),
+            {variant, [{"None", []}, {"Some", [T2]}]};
+        <<"tuple">> ->
+            {tuple, [unfold_type(Env, ScopeName, T) || T <- JSONTypeArgs]};
+        _ when is_binary(TypeName) ->
+            io:format("BBB: ~p ~p\n", [TypeName, JSONTypeArgs]),
+            %% Ok we encountered a general type substitution
+            [Namespace, TName] = binary:split(TypeName, <<".">>),
+            {#scope{typedefs = Typedefs}, _} = maps:get(Namespace, Env),
+            ResolvedType = maps:get(TName, Typedefs),
+            %% Ok we resolved the type, now do the substitution
+            SubstitutedType = do_type_substitution(ResolvedType, JSONTypeArgs),
+            unfold_type(Env, ScopeName, SubstitutedType)
+    end.
 
-%% Char
-lex_string_(char, [$\\, Code, $' | String], Stack, Acc) ->
-    Char = case Code of
-        $'  -> $';
-        $\\ -> $\\;
-        $b  -> $\b;
-        $e  -> $\e;
-        $f  -> $\f;
-        $n  -> $\n;
-        $r  -> $\r;
-        $t  -> $\t;
-        $v  -> $\v;
-        _   -> {error, bad_char}
-    end,
-    case Char of
-        {error, _} = Err ->
-            Err;
+do_type_substitution({Type, []}, []) when is_binary(Type) -> Type;
+do_type_substitution({Type, TNames}, TArgs) when length(TNames) =:= length(TArgs) ->
+    do_type_substitution_(Type, lists:zip(TNames, TArgs)).
+
+do_type_substitution_(Type, []) -> Type;
+do_type_substitution_(Type, [{TName, TVal} | Rules]) ->
+    do_type_substitution_(apply_single_substitution_rule(Type, TName, TVal), Rules).
+
+apply_single_substitution_rule(T, T, TVal) -> TVal;
+apply_single_substitution_rule(#{<<"variant">> := Options1}, TName, TVal) ->
+    Options2 = lists:map(
+        fun(V) ->
+            [{CName, CArgs}] = maps:to_list(V),
+            #{CName => [change_if_equal(Arg, TName, TVal) || Arg <- CArgs]}
+        end, Options1),
+    #{<<"variant">> => Options2}.
+
+change_if_equal(T, T, TVal) -> TVal;
+change_if_equal(T, _, _) -> T.
+
+encode_call_data(#contract_aci{} = Aci, Call) when is_binary(Call) ->
+    encode_call_data(Aci, binary_to_list(Call));
+encode_call_data(#contract_aci{scopes = Scopes, main_contract = ContractName} = Aci, Call) when is_list(Call) ->
+    Tokens = aeaci_lexer:string(Call),
+    #ast_call{what = #ast_id{namespace = [], id = What}, args = #ast_tuple{args = UserArgs}} = aeaci_parser:parse_call(Tokens),
+    #scope{functions = Functions} = maps:get(ContractName, Scopes),
+    case maps:find(list_to_binary(What), Functions) of
+        {ok, {FunctionArgs, _}} when length(FunctionArgs) =:= length(UserArgs) ->
+            %% Great! We found what we want to call
+            %% Now we need to unfold typedefs and
+            ok;
         _ ->
-            skip_whitespace(String, Stack, [{char, Char} | Acc])
-    end;
-lex_string_(char, [Char, $' | String], Stack, Acc) ->
-    skip_whitespace(String, Stack, [{char, Char} | Acc]).
-
-hex_char_to_val(Char) when ?IS_DIGIT(Char) ->
-    Char - $0;
-hex_char_to_val(Char) ->
-    string:to_lower(Char) - $a + 10.
+            {error, list_to_binary(io_lib:format("Undefined function ~s/~p in contract ~s", [What, length(UserArgs), ContractName]))}
+    end.
