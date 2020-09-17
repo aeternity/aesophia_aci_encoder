@@ -33,6 +33,7 @@
     | #ast_number{}
     | #ast_bytes{}
     | #ast_map{}
+    | #ast_record{}
     | #ast_adt{}
     | #ast_account{}
     | #ast_contract{}

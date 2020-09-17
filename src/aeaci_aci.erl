@@ -9,7 +9,11 @@
 -module(aeaci_aci).
 
 %% API
--export([file/1, encode_call_data/2]).
+-export([file/1, from_string/2, encode_call_data/2]).
+
+-ifdef(TEST).
+-export([generate_tests/3]).
+-endif.
 
 -include("aeaci_ast.hrl").
 
@@ -29,7 +33,7 @@
     | {map, aci_typedef(), aci_typedef()}
     | {tuple, [aci_typedef()]}
     | {variant, [{string(), [aci_typedef()]}]}
-    | {record, [#{string() => aci_typedef()}]}.
+    | {record, [{string(), aci_typedef()}]}.
 
 -type json_type() :: #{ binary() => term() } | binary().
 
@@ -42,10 +46,13 @@
 
 -spec file(string()) -> #contract_aci{}.
 file(Filename) ->
-  file(Filename, #{backend => fate, compiler_version => v4_3_1}).
+  file(Filename, #{backend => fate}).
 
 file(Filename, Opts) ->
     {ok, JText} = file:read_file(Filename),
+    from_string(JText, Opts).
+
+from_string(JText, Opts) ->
     Contracts =
               case jsx:decode(JText, [{labels, binary}, return_maps]) of
                   JArray when is_list(JArray)  -> JArray;
@@ -92,7 +99,6 @@ unfold_types_in_function(Env, ScopeName, {FArgs, FRet}) ->
 
 -spec unfold_type(#{binary() => {#scope{}, #{ binary() => {[json_type()], json_type()}}}}, binary(), json_type()) -> aci_typedef().
 unfold_type(Env, ScopeName, TypeName) when is_binary(TypeName) ->
-    io:format("ZZZZ: Scope: ~p ~p\n", [ScopeName, TypeName]),
     [First | _] = binary_to_list(TypeName),
     case binary:split(TypeName, <<".">>) of
         [<<"unit">>] -> {tuple, []};
@@ -116,20 +122,23 @@ unfold_type(Env, ScopeName, TypeName) when is_binary(TypeName) ->
             {#scope{is_contract = true}, _} = maps:get(TypeName, Env),
             contract;
         [<<"Chain">>, <<"ttl">>] ->
-            todo;
+            {variant, [{"RelativeTTL", [int]}, {"FixedTTL", [int]}]};
         [Namespace, Typename] -> unfold_type(Env, Namespace, Typename)
     end;
 unfold_type(Env, ScopeName, TypeDef) when is_map(TypeDef), 1 =:= map_size(TypeDef) ->
     [{TypeName, JSONTypeArgs}] = maps:to_list(TypeDef),
-    io:format("AAAA: Scope: ~p ~p ~p\n", [ScopeName, TypeName, JSONTypeArgs]),
     case TypeName of
         <<"map">> ->
             [KT, VT] = JSONTypeArgs,
             {map, unfold_type(Env, ScopeName, KT), unfold_type(Env, ScopeName, VT)};
         <<"variant">> ->
-            todo;
+            {variant,
+                [{binary_to_list(K), V} || [{K,V}] <- [maps:to_list(maps:map(fun(_, TL) ->
+                        [unfold_type(Env, ScopeName, T) || T <- TL]
+                             end, Arg)) || Arg <- JSONTypeArgs]]
+            };
         <<"record">> ->
-            {record, maps:from_list([{KeyName, unfold_type(Env, ScopeName, KeyType)} || #{<<"name">> := KeyName, <<"type">> := KeyType} <- JSONTypeArgs])};
+            {record, [{KeyName, unfold_type(Env, ScopeName, KeyType)} || #{<<"name">> := KeyName, <<"type">> := KeyType} <- JSONTypeArgs]};
         <<"bytes">> ->
             {bytes, JSONTypeArgs};
         <<"list">> ->
@@ -178,7 +187,7 @@ change_if_equal(T, _, _) -> T.
 
 encode_call_data(#contract_aci{} = Aci, Call) when is_binary(Call) ->
     encode_call_data(Aci, binary_to_list(Call));
-encode_call_data(#contract_aci{scopes = Scopes, main_contract = ContractName} = Aci, Call) when is_list(Call) ->
+encode_call_data(#contract_aci{scopes = Scopes, main_contract = ContractName, opts = Opts}, Call) when is_list(Call) ->
     Tokens = aeaci_lexer:string(Call),
     #ast_call{what = #ast_id{namespace = [], id = What}, args = #ast_tuple{args = UserArgs}} = aeaci_parser:parse_call(Tokens),
     #scope{functions = Functions} = maps:get(ContractName, Scopes),
@@ -186,7 +195,133 @@ encode_call_data(#contract_aci{scopes = Scopes, main_contract = ContractName} = 
         {ok, {FunctionArgs, _}} when length(FunctionArgs) =:= length(UserArgs) ->
             %% Great! We found what we want to call
             %% Now we need to unfold typedefs and
-            ok;
+            case maps:get(backend, Opts, fate) of
+                fate ->
+                    {ok, Calldata} = aeb_fate_abi:create_calldata(What, [type_encode_fate(T1, T2) || {T1, T2} <- lists:zip(FunctionArgs, UserArgs)]),
+                    aeser_api_encoder:encode(contract_bytearray, Calldata)
+            end;
         _ ->
             {error, list_to_binary(io_lib:format("Undefined function ~s/~p in contract ~s", [What, length(UserArgs), ContractName]))}
     end.
+
+-spec type_encode_fate(aci_typedef(), ast_literal()) -> term().
+type_encode_fate(int, #ast_number{val = Val}) -> aeb_fate_data:make_integer(Val);
+type_encode_fate(bool, #ast_bool{val = Val}) -> aeb_fate_data:make_boolean(Val);
+type_encode_fate(string, #ast_string{val = Val}) -> aeb_fate_data:make_string(Val);
+type_encode_fate(char, #ast_char{val = Val}) -> aeb_fate_data:make_integer(Val);
+type_encode_fate(address, #ast_account{pubkey = Pub}) -> aeb_fate_data:make_address(Pub);
+type_encode_fate(contract, #ast_contract{pubkey = Pub}) -> aeb_fate_data:make_contract(Pub);
+type_encode_fate(oracle_id, #ast_oracle{pubkey = Pub}) -> aeb_fate_data:make_oracle(Pub);
+type_encode_fate(oracle_query_id, #ast_oracle_query{id = Id}) -> aeb_fate_data:make_oracle_query(Id);
+type_encode_fate({list, LType}, #ast_list{args = LArgs}) ->
+    aeb_fate_data:make_list([type_encode_fate(LType, Arg) || Arg <- LArgs]);
+type_encode_fate({tuple, TList}, #ast_tuple{args = TArgs}) when length(TList) =:= length(TArgs) ->
+    aeb_fate_data:make_tuple(list_to_tuple([type_encode_fate(T, Arg) || {T, Arg} <- lists:zip(TList, TArgs)]));
+type_encode_fate({map, KT, VT}, #ast_map{data = Data}) ->
+    aeb_fate_data:make_map(
+        maps:from_list([
+            {type_encode_fate(KT, K), type_encode_fate(VT, V)}
+            || {K, V} <- maps:to_list(Data)]
+        ));
+type_encode_fate({bytes, Size}, #ast_bytes{val = Binary}) when byte_size(Binary) =:= Size ->
+    aeb_fate_data:make_bytes(Binary);
+type_encode_fate({record, Defs}, #ast_record{data = NamedArgs}) when length(Defs) =:= length(NamedArgs) ->
+    ArgsMap = maps:from_list([{list_to_binary(Name), Val} || #ast_named_arg{name = #ast_id{namespace = [], id = Name}, value = Val} <- NamedArgs]),
+    true = map_size(ArgsMap) =:= length(Defs),
+    aeb_fate_data:make_tuple(list_to_tuple([type_encode_fate(Type, maps:get(Name, ArgsMap)) || {Name, Type} <- Defs]));
+type_encode_fate({variant, Cons}, #ast_adt{con = #ast_con{namespace = _, con = ConName}, args = #ast_tuple{args = Args}}) ->
+    {Ar, _, ConNum, ConArgsT} = lists:foldl(
+        fun ({ConName1, ConArgTypes}, {Arities, Pos, _, _}) when ConName1 =:= ConName ->
+                {[length(ConArgTypes)|Arities], Pos+1, Pos, ConArgTypes};
+            ({_, ConArgTypes}, {Arities, Pos, FoundPos, FoundArgs}) ->
+                {[length(ConArgTypes)|Arities], Pos+1, FoundPos, FoundArgs} end,
+        {[], 0, error, error}, Cons),
+    true = length(Args) =:= length(ConArgsT),
+    io:format("~p ~p ~p ~p ~p\n", [ConName, Cons, ConNum, Ar, ConArgsT]),
+    aeb_fate_data:make_variant(lists:reverse(Ar), ConNum, list_to_tuple(
+        [type_encode_fate(Type, Arg) || {Type, Arg} <- lists:zip(ConArgsT, Args)]));
+type_encode_fate(ACI_Type, Ast_Type) ->
+    io:format("Could not encode ~p as ~p", [Ast_Type, ACI_Type]).
+
+-ifdef(TEST).
+generate_tests(EncodeCallCachePath, DecodeCallCachePath, ResPath) ->
+    {ok, ET} = ets:file2tab(EncodeCallCachePath),
+    {ok, DT} = ets:file2tab(DecodeCallCachePath),
+    D = [#{<<"source">> => Source, <<"fun_name">> => FunName, <<"version">> => VM, <<"outcome">> => Outcome, <<"call_res">> => CallRes, <<"decoded">> => Res}
+        || {decode_call_cache_entry, {decode_call_id, Source, {FunName, VM}, Outcome, CallRes}, Res} <- ets:tab2list(DT)],
+    E = [#{<<"source">> => Source, <<"version">> => Version, <<"vm">> => VM, <<"call">> => Call, <<"calldata">> => Value} || {encode_call_cache_entry, {encode_call_id, Version, Source, _, Call, VM}, {ok, Value}} <- ets:tab2list(ET)],
+    {R, _} = lists:foldl(
+        fun (#{<<"source">> := Source0
+            , <<"version">> := Version
+            , <<"vm">> := VM
+            , <<"call">> := Call
+            , <<"calldata">> := Value}, {R, A}) ->
+            try
+                Source = binary:replace(to_bin(Source0), <<"include \"String.aes\"\n">>, <<"">>),
+                Aci = case maps:find(Source, A) of
+                          {ok, Aci1} -> Aci1;
+                          _ -> gen_aci(Source, VM)
+                      end,
+
+                CaseType = maps:get(encode, R, #{}),
+                VmType = maps:get(VM, CaseType, #{}),
+                SophiaVer = maps:get(Version, VmType, #{}),
+                Examples = maps:get(Aci, SophiaVer, []),
+                {
+                    maps:put(encode,
+                    maps:put(VM,
+                    maps:put(Version,
+                    maps:put(Aci,
+                            [#{<<"call">> => to_bin(Call), <<"calldata">> => aeser_api_encoder:encode(contract_bytearray, Value)}|Examples]
+                            , SophiaVer), VmType), CaseType), R),
+                    maps:put(Source, Aci, A)
+                }
+            catch error:Err ->
+                io:format("Warning: ~p\n Skipping contract ~p\n\n\n", [Err, Source0]),
+                {R, A}
+            end;
+            (#{ <<"source">> := Source0
+              , <<"fun_name">> := FunName
+              , <<"version">> := VM
+              , <<"outcome">> := Outcome
+              , <<"call_res">> := CallRes
+              , <<"decoded">> := Res}, {R, A}) ->
+                Source = binary:replace(to_bin(Source0), <<"include \"String.aes\"\n">>, <<"">>),
+                Aci = case maps:find(Source, A) of
+                          {ok, Aci1} -> Aci1;
+                          _ -> gen_aci(Source, VM)
+                      end,
+                CaseType = maps:get(decode, R, #{}),
+                VmType = maps:get(VM, CaseType, #{}),
+                Examples = maps:get(Aci, VmType, []),
+                {
+                    maps:put(decode,
+                    maps:put(VM,
+                    maps:put(Aci,
+                            [#{ <<"fun_name">> => to_bin(FunName),
+                                <<"outcome">> => to_bin(Outcome),
+                                <<"call_res">> => to_bin(CallRes),
+                                <<"decoded">> => Res}|Examples]
+                            , VmType), CaseType), R),
+                    maps:put(Source, Aci, A)
+                }
+        end, {#{}, #{}}, E++D),
+    file:write_file(ResPath, io_lib:format("~s", [jsx:encode(R)])).
+
+to_bin(ok) -> <<"ok">>;
+to_bin(revert) -> <<"revert">>;
+to_bin(Bin) when is_binary(Bin) -> Bin;
+to_bin(Str) when is_list(Str) -> list_to_binary(Str).
+
+gen_aci(Source, VM) ->
+    try
+        {ok, Enc} = aeso_aci:contract_interface(json, Source, [{backend, VM}]),
+        jsx:encode(Enc)
+    catch error:_ ->
+        %% Try to generate the aci with aesophia_cli :P
+        file:write_file("/tmp/.aesophia", Source),
+        Res = os:cmd(code:priv_dir(aesophia_cli) ++ "/bin/v4.3.1/aesophia_cli --create_json_aci /tmp/.aesophia -b " ++ atom_to_list(VM)),
+        file:delete("/tmp/.aesophia"),
+        list_to_binary(Res)
+    end.
+-endif.
