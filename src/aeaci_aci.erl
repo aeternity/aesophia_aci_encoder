@@ -69,7 +69,8 @@ from_string(JText, Opts) ->
                 fun(_, FBody) -> unfold_types_in_function(Env1, ScopeName, FBody)
                 end, FoldedFuns)}
         end, Env1),
-    #contract_aci{scopes = Env2, main_contract = Default, opts = Opts}.
+    Env3 = maybe_strip_typedefs(Env2, maps:get(strip, Opts, true)),
+    #contract_aci{scopes = Env3, main_contract = Default, opts = Opts}.
 
 parse_contract(#{<<"contract">> := #{<<"name">> := ScopeName, <<"functions">> := F0, <<"type_defs">> := T0} = C}) ->
     MkTDef = fun(N, T) -> #{<<"name">> => N, <<"vars">> => [], <<"typedef">> => T} end,
@@ -93,6 +94,10 @@ parse_contract(#{<<"namespace">> := #{<<"name">> := ScopeName, <<"type_defs">> :
     {ScopeName, {#scope{typedefs = maps:from_list(ScopeTypes), functions = #{}, is_contract = false}, #{}}};
 parse_contract(#{<<"namespace">> := _}) ->
     skip.
+
+maybe_strip_typedefs(Env, false) -> Env;
+maybe_strip_typedefs(Env, true) ->
+    maps:map(fun(_, Scope) -> Scope#scope{typedefs = #{}} end, Env).
 
 unfold_types_in_function(Env, ScopeName, {FArgs, FRet}) ->
     {[unfold_type(Env, ScopeName, T) || T <- FArgs], unfold_type(Env, ScopeName, FRet)}.
@@ -121,10 +126,28 @@ unfold_type(Env, ScopeName, TypeName) when is_binary(TypeName) ->
             %% Remote contract
             {#scope{is_contract = true}, _} = maps:get(TypeName, Env),
             contract;
+        %% Chain TTL was in sophia since the beginning
         [<<"Chain">>, <<"ttl">>] ->
-            {variant, [{"RelativeTTL", [int]}, {"FixedTTL", [int]}]};
-        [<<"AENS">>, _] ->
-            todo;
+            ttl_t();
+        %% Types for GA account sophia contracts
+        [<<"Chain">>, <<"paying_for_tx">>] ->
+            paying_for_tx_t();
+        [<<"Chain">>, <<"ga_meta_tx">>] ->
+            ga_meta_tx_t();
+        [<<"Chain">>, <<"base_tx">>] ->
+            base_tx_t();
+        [<<"Chain">>, <<"tx">>] ->
+            {record,
+                [{"paying_for", option_t(paying_for_tx_t())}, {"ga_metas", {list, ga_meta_tx_t()}},
+                 {"actor", address}, {"fee", int}, {"ttl", int}, {"tx", base_tx_t()}]};
+        % AENS types
+        [<<"AENS">>, <<"pointee">>] ->
+            pointee_t();
+        [<<"AENS">>, <<"name">>] ->
+            {variant, [{"Name", [address, ttl_t(), {map, string, pointee_t()}]}]};
+        %% Fancy crypto primitives
+        %%[<<"MCL_BLS12_381">>, <<"fr">>] -> error("no constructor");
+        %%[<<"MCL_BLS12_381">>, <<"fp">>] -> error("no constructor");
         [Namespace, Typename] -> unfold_type(Env, Namespace, Typename)
     end;
 unfold_type(Env, ScopeName, TypeDef) when is_map(TypeDef), 1 =:= map_size(TypeDef) ->
@@ -152,8 +175,7 @@ unfold_type(Env, ScopeName, TypeDef) when is_map(TypeDef), 1 =:= map_size(TypeDe
             oracle_id;
         <<"option">> ->
             [T1] = JSONTypeArgs,
-            T2 = unfold_type(Env, ScopeName, T1),
-            {variant, [{"None", []}, {"Some", [T2]}]};
+            option_t(unfold_type(Env, ScopeName, T1));
         <<"tuple">> ->
             {tuple, [unfold_type(Env, ScopeName, T) || T <- JSONTypeArgs]};
         _ when is_binary(TypeName) ->
@@ -166,6 +188,47 @@ unfold_type(Env, ScopeName, TypeDef) when is_map(TypeDef), 1 =:= map_size(TypeDe
             unfold_type(Env, ScopeName, SubstitutedType)
     end.
 
+ttl_t() ->
+    {variant, [{"RelativeTTL", [int]}, {"FixedTTL", [int]}]}.
+option_t(T) ->
+    {variant, [{"None", []}, {"Some", [T]}]}.
+paying_for_tx_t() ->
+    {variant, [{"PayingForTx", [address, int]}]}.
+ga_meta_tx_t() ->
+    {variant, [{"GAMetaTx", [address, int]}]}.
+base_tx_t() ->
+    {variant,
+    [ {"SpendTx",      [address, int, string]}
+    , {"OracleRegisterTx",       []}
+    , {"OracleQueryTx",          []}
+    , {"OracleResponseTx",       []}
+    , {"OracleExtendTx",         []}
+    , {"NamePreclaimTx",         []}
+    , {"NameClaimTx",            [string]}
+    , {"NameUpdateTx",           [{bytes, 32}]}
+    , {"NameRevokeTx",           [{bytes, 32}]}
+    , {"NameTransferTx",         [address, {bytes, 32}]}
+    , {"ChannelCreateTx",        [address]}
+    , {"ChannelDepositTx",       [address, int]}
+    , {"ChannelWithdrawTx",      [address, int]}
+    , {"ChannelForceProgressTx", [address]}
+    , {"ChannelCloseMutualTx",   [address]}
+    , {"ChannelCloseSoloTx",     [address]}
+    , {"ChannelSlashTx",         [address]}
+    , {"ChannelSettleTx",        [address]}
+    , {"ChannelSnapshotSoloTx",  [address]}
+    , {"ContractCreateTx",       [int]}
+    , {"ContractCallTx",         [address, int]}
+    , {"GAAttachTx",             []}
+    ]}.
+pointee_t() ->
+    {variant,
+    [ {"AccountPt", [address]}
+    , {"OraclePt", [address]}
+    , {"ContractPt", [address]}
+    , {"ChannelPt", [address]}
+    ]}.
+
 do_type_substitution({Type, []}, []) when is_binary(Type) -> Type;
 do_type_substitution({Type, TNames}, TArgs) when length(TNames) =:= length(TArgs) ->
     do_type_substitution_(Type, lists:zip(TNames, TArgs)).
@@ -175,8 +238,6 @@ do_type_substitution_(Type, [{TName, TVal} | Rules]) ->
     do_type_substitution_(apply_single_substitution_rule(Type, TName, TVal), Rules).
 
 apply_single_substitution_rule(T, T, TVal) -> TVal;
-apply_single_substitution_rule(#{<<"map">> := [KT, KV]}, TName, TVal) ->
-    #{<<"map">> => [change_if_equal(KT, TName, TVal), change_if_equal(KV, TName, TVal)]};
 apply_single_substitution_rule(#{<<"variant">> := Options1}, TName, TVal) ->
     Options2 = lists:map(
         fun(V) ->
@@ -186,12 +247,8 @@ apply_single_substitution_rule(#{<<"variant">> := Options1}, TName, TVal) ->
     #{<<"variant">> => Options2};
 apply_single_substitution_rule(#{<<"record">> := NamedArgs}, TName, TVal) ->
     #{<<"record">> => [#{<<"name">> => N, <<"type">> => change_if_equal(T, TName, TVal)} || #{<<"name">> := N, <<"type">> := T} <- NamedArgs]};
-apply_single_substitution_rule(#{<<"list">> := [T]}, TName, TVal) ->
-    #{<<"list">> => [change_if_equal(T, TName, TVal)]};
-apply_single_substitution_rule(#{<<"option">> := [T]}, TName, TVal) ->
-    #{<<"option">> => [change_if_equal(T, TName, TVal)]};
-apply_single_substitution_rule(#{<<"tuple">> := Tuple}, TName, TVal) ->
-    #{<<"tuple">> => [change_if_equal(T, TName, TVal) || T <- Tuple]}.
+apply_single_substitution_rule(Map, TName, TVal) when is_map(Map) ->
+    maps:map(fun(_, Types) -> [change_if_equal(T, TName, TVal) || T <- Types] end, Map).
 
 change_if_equal(T, T, TVal) -> TVal;
 change_if_equal(T, _, _) -> T.
@@ -210,17 +267,17 @@ encode_call_data(#contract_aci{scopes = Scopes, main_contract = ContractName, op
                 fate ->
                     aeb_fate_abi:create_calldata(What, [type_encode_fate(T1, T2) || {T1, T2} <- lists:zip(ArgTypes, UserArgs)]);
                 aevm ->
-                    A = [type_encode_aevm(T1, T2) || {T1, T2} <- lists:zip(ArgTypes, UserArgs)],
-                    B = [to_aevm_type(T) || T <- ArgTypes],
-                    C = to_aevm_type(RetType),
-                    C1 = case What of
-                             "init" ->
-                                 {tuple, [typerep, C]};
-                             _ ->
-                                 C
+                    EncRetType = case {What, to_aevm_type(RetType)} of
+                             {"init", E} ->
+                                 {tuple, [typerep, E]};
+                             {_, E} ->
+                                 E
                     end,
-                    io:format(user, "~p ~p ~p ~p ~p\n", [A, B, C1, ArgTypes, UserArgs]),
-                    aeb_aevm_abi:create_calldata(What, A, B, C1)
+                    aeb_aevm_abi:create_calldata(
+                        What,
+                        [type_encode_aevm(T1, T2) || {T1, T2} <- lists:zip(ArgTypes, UserArgs)],
+                        [to_aevm_type(T) || T <- ArgTypes],
+                        EncRetType)
             end;
         _ ->
             {error, list_to_binary(io_lib:format("Undefined function ~s/~p in contract ~s", [What, length(UserArgs), ContractName]))}

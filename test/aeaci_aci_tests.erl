@@ -34,7 +34,7 @@ test_aevm_encoder_fixtures() ->
              [begin
                   {ok, Calldata} = aeser_api_encoder:safe_decode(contract_bytearray, ClientCalldata),
                   {ok, EncodedCall} = aeaci_aci:encode_call_data(CompiledAci, Call),
-                  io:format(user, "~s ~p \n", [Aci, Call]),
+                  %% io:format(user, "~s ~p \n", [Aci, Call]),
                   ?assertEqual(Calldata, EncodedCall)
               end || #{<<"call">> := Call, <<"calldata">> := ClientCalldata} <- Tests]
          end || {Aci, Tests} <- maps:to_list(Cases)]
