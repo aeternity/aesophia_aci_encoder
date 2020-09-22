@@ -22,3 +22,7 @@ aesophia
 .qcci
 current_counterexample.eqc
 nohup.out
+*.aes
+*.aci
+decode_call_cache_iris
+encode_call_cache_iris
