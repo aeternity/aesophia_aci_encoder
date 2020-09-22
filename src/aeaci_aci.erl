@@ -350,7 +350,7 @@ type_encode_aevm(oracle_query_id, #ast_oracle_query{id = <<Id:32/unit:8>>}) -> I
 type_encode_aevm({list, LType}, #ast_list{args = LArgs}) ->
     [type_encode_aevm(LType, Arg) || Arg <- LArgs];
 type_encode_aevm({tuple, TList}, #ast_tuple{args = TArgs}) when length(TList) =:= length(TArgs) ->
-    {tuple, [type_encode_aevm(T, Arg) || {T, Arg} <- lists:zip(TList, TArgs)]};
+    list_to_tuple([type_encode_aevm(T, Arg) || {T, Arg} <- lists:zip(TList, TArgs)]);
 type_encode_aevm({map, KT, VT}, #ast_map{data = Data}) ->
         maps:from_list([
             {type_encode_aevm(KT, K), type_encode_aevm(VT, V)}
@@ -364,7 +364,7 @@ type_encode_aevm({bytes, Size}, #ast_bytes{val = Binary}) when byte_size(Binary)
 type_encode_aevm({record, Defs}, #ast_record{data = NamedArgs}) when length(Defs) =:= length(NamedArgs) ->
     ArgsMap = maps:from_list([{list_to_binary(Name), Val} || #ast_named_arg{name = #ast_id{namespace = [], id = Name}, value = Val} <- NamedArgs]),
     true = map_size(ArgsMap) =:= length(Defs),
-    {tuple, [type_encode_aevm(Type, maps:get(Name, ArgsMap)) || {Name, Type} <- Defs]};
+    list_to_tuple([type_encode_aevm(Type, maps:get(Name, ArgsMap)) || {Name, Type} <- Defs]);
 type_encode_aevm({variant, Cons}, #ast_adt{con = #ast_con{namespace = _, con = ConName}, args = #ast_tuple{args = Args}}) ->
     {_, _, ConNum, ConArgsT} = lists:foldl(
         fun ({ConName1, ConArgTypes}, {Arities, Pos, _, _}) when ConName1 =:= ConName ->
