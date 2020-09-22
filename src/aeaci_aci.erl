@@ -123,6 +123,8 @@ unfold_type(Env, ScopeName, TypeName) when is_binary(TypeName) ->
             contract;
         [<<"Chain">>, <<"ttl">>] ->
             {variant, [{"RelativeTTL", [int]}, {"FixedTTL", [int]}]};
+        [<<"AENS">>, _] ->
+            todo;
         [Namespace, Typename] -> unfold_type(Env, Namespace, Typename)
     end;
 unfold_type(Env, ScopeName, TypeDef) when is_map(TypeDef), 1 =:= map_size(TypeDef) ->
@@ -155,7 +157,6 @@ unfold_type(Env, ScopeName, TypeDef) when is_map(TypeDef), 1 =:= map_size(TypeDe
         <<"tuple">> ->
             {tuple, [unfold_type(Env, ScopeName, T) || T <- JSONTypeArgs]};
         _ when is_binary(TypeName) ->
-            io:format("BBB: ~p ~p\n", [TypeName, JSONTypeArgs]),
             %% Ok we encountered a general type substitution
             [Namespace, TName] = binary:split(TypeName, <<".">>),
             {#scope{typedefs = Typedefs}, _} = maps:get(Namespace, Env),
@@ -174,13 +175,23 @@ do_type_substitution_(Type, [{TName, TVal} | Rules]) ->
     do_type_substitution_(apply_single_substitution_rule(Type, TName, TVal), Rules).
 
 apply_single_substitution_rule(T, T, TVal) -> TVal;
+apply_single_substitution_rule(#{<<"map">> := [KT, KV]}, TName, TVal) ->
+    #{<<"map">> => [change_if_equal(KT, TName, TVal), change_if_equal(KV, TName, TVal)]};
 apply_single_substitution_rule(#{<<"variant">> := Options1}, TName, TVal) ->
     Options2 = lists:map(
         fun(V) ->
             [{CName, CArgs}] = maps:to_list(V),
             #{CName => [change_if_equal(Arg, TName, TVal) || Arg <- CArgs]}
         end, Options1),
-    #{<<"variant">> => Options2}.
+    #{<<"variant">> => Options2};
+apply_single_substitution_rule(#{<<"record">> := NamedArgs}, TName, TVal) ->
+    #{<<"record">> => [#{<<"name">> => N, <<"type">> => change_if_equal(T, TName, TVal)} || #{<<"name">> := N, <<"type">> := T} <- NamedArgs]};
+apply_single_substitution_rule(#{<<"list">> := [T]}, TName, TVal) ->
+    #{<<"list">> => [change_if_equal(T, TName, TVal)]};
+apply_single_substitution_rule(#{<<"option">> := [T]}, TName, TVal) ->
+    #{<<"option">> => [change_if_equal(T, TName, TVal)]};
+apply_single_substitution_rule(#{<<"tuple">> := Tuple}, TName, TVal) ->
+    #{<<"tuple">> => [change_if_equal(T, TName, TVal) || T <- Tuple]}.
 
 change_if_equal(T, T, TVal) -> TVal;
 change_if_equal(T, _, _) -> T.
@@ -192,13 +203,24 @@ encode_call_data(#contract_aci{scopes = Scopes, main_contract = ContractName, op
     #ast_call{what = #ast_id{namespace = [], id = What}, args = #ast_tuple{args = UserArgs}} = aeaci_parser:parse_call(Tokens),
     #scope{functions = Functions} = maps:get(ContractName, Scopes),
     case maps:find(list_to_binary(What), Functions) of
-        {ok, {FunctionArgs, _}} when length(FunctionArgs) =:= length(UserArgs) ->
+        {ok, {ArgTypes, RetType}} when length(ArgTypes) =:= length(UserArgs) ->
             %% Great! We found what we want to call
             %% Now we need to unfold typedefs and
             case maps:get(backend, Opts, fate) of
                 fate ->
-                    {ok, Calldata} = aeb_fate_abi:create_calldata(What, [type_encode_fate(T1, T2) || {T1, T2} <- lists:zip(FunctionArgs, UserArgs)]),
-                    aeser_api_encoder:encode(contract_bytearray, Calldata)
+                    aeb_fate_abi:create_calldata(What, [type_encode_fate(T1, T2) || {T1, T2} <- lists:zip(ArgTypes, UserArgs)]);
+                aevm ->
+                    A = [type_encode_aevm(T1, T2) || {T1, T2} <- lists:zip(ArgTypes, UserArgs)],
+                    B = [to_aevm_type(T) || T <- ArgTypes],
+                    C = to_aevm_type(RetType),
+                    C1 = case What of
+                             "init" ->
+                                 {tuple, [typerep, C]};
+                             _ ->
+                                 C
+                    end,
+                    io:format(user, "~p ~p ~p ~p ~p\n", [A, B, C1, ArgTypes, UserArgs]),
+                    aeb_aevm_abi:create_calldata(What, A, B, C1)
             end;
         _ ->
             {error, list_to_binary(io_lib:format("Undefined function ~s/~p in contract ~s", [What, length(UserArgs), ContractName]))}
@@ -237,11 +259,66 @@ type_encode_fate({variant, Cons}, #ast_adt{con = #ast_con{namespace = _, con = C
                 {[length(ConArgTypes)|Arities], Pos+1, FoundPos, FoundArgs} end,
         {[], 0, error, error}, Cons),
     true = length(Args) =:= length(ConArgsT),
-    io:format("~p ~p ~p ~p ~p\n", [ConName, Cons, ConNum, Ar, ConArgsT]),
     aeb_fate_data:make_variant(lists:reverse(Ar), ConNum, list_to_tuple(
         [type_encode_fate(Type, Arg) || {Type, Arg} <- lists:zip(ConArgsT, Args)]));
 type_encode_fate(ACI_Type, Ast_Type) ->
-    io:format("Could not encode ~p as ~p", [Ast_Type, ACI_Type]).
+    io:format("Could not encode ~p as ~p for FATE VM", [Ast_Type, ACI_Type]).
+
+to_aevm_type(int) -> word;
+to_aevm_type(bool) -> word;
+to_aevm_type({bytes, ByteSize}) when ByteSize =< 32 -> word;
+to_aevm_type({bytes, ByteSize}) -> {tuple, [word || _ <- lists:seq(1, (ByteSize + 31) div 32)]};
+to_aevm_type(string) -> string;
+to_aevm_type(char) -> word;
+to_aevm_type(address) -> word;
+to_aevm_type(contract) -> word;
+to_aevm_type(oracle_query_id) -> word;
+to_aevm_type(oracle_id) -> word;
+to_aevm_type({list, TDef}) -> {list, to_aevm_type(TDef)};
+to_aevm_type({map, TK, TV}) -> {map, to_aevm_type(TK), to_aevm_type(TV)};
+to_aevm_type({tuple, TDefs}) -> {tuple, [to_aevm_type(T) || T <- TDefs]};
+to_aevm_type({variant, Cons}) -> {variant, [[to_aevm_type(T) || T <- TDefs] || {_, TDefs} <- Cons]};
+to_aevm_type({record, TDefs}) -> {tuple,[to_aevm_type(T) || {_, T} <- TDefs]}.
+
+-spec type_encode_aevm(aci_typedef(), ast_literal()) -> term().
+type_encode_aevm(int, #ast_number{val = Val}) -> Val;
+type_encode_aevm(bool, #ast_bool{val = false}) -> 1;
+type_encode_aevm(bool, #ast_bool{val = true}) -> 1;
+type_encode_aevm(string, #ast_string{val = Val}) -> list_to_binary(Val);
+type_encode_aevm(char, #ast_char{val = Val}) -> Val;
+type_encode_aevm(address, #ast_account{pubkey = <<Pub:32/unit:8>>}) -> Pub;
+type_encode_aevm(contract, #ast_contract{pubkey = <<Pub:32/unit:8>>}) -> Pub;
+type_encode_aevm(oracle_id, #ast_oracle{pubkey = <<Pub:32/unit:8>>}) -> Pub;
+type_encode_aevm(oracle_query_id, #ast_oracle_query{id = <<Id:32/unit:8>>}) -> Id;
+type_encode_aevm({list, LType}, #ast_list{args = LArgs}) ->
+    [type_encode_aevm(LType, Arg) || Arg <- LArgs];
+type_encode_aevm({tuple, TList}, #ast_tuple{args = TArgs}) when length(TList) =:= length(TArgs) ->
+    {tuple, [type_encode_aevm(T, Arg) || {T, Arg} <- lists:zip(TList, TArgs)]};
+type_encode_aevm({map, KT, VT}, #ast_map{data = Data}) ->
+        maps:from_list([
+            {type_encode_aevm(KT, K), type_encode_aevm(VT, V)}
+            || {K, V} <- maps:to_list(Data)]
+        );
+type_encode_aevm({bytes, Size}, #ast_bytes{val = Binary}) when byte_size(Binary) =:= Size ->
+    case aeb_memory:binary_to_words(Binary) of
+        [Word] -> Word;
+        Words  -> list_to_tuple([W || W <- Words])
+    end;
+type_encode_aevm({record, Defs}, #ast_record{data = NamedArgs}) when length(Defs) =:= length(NamedArgs) ->
+    ArgsMap = maps:from_list([{list_to_binary(Name), Val} || #ast_named_arg{name = #ast_id{namespace = [], id = Name}, value = Val} <- NamedArgs]),
+    true = map_size(ArgsMap) =:= length(Defs),
+    {tuple, [type_encode_aevm(Type, maps:get(Name, ArgsMap)) || {Name, Type} <- Defs]};
+type_encode_aevm({variant, Cons}, #ast_adt{con = #ast_con{namespace = _, con = ConName}, args = #ast_tuple{args = Args}}) ->
+    {_, _, ConNum, ConArgsT} = lists:foldl(
+        fun ({ConName1, ConArgTypes}, {Arities, Pos, _, _}) when ConName1 =:= ConName ->
+                {[length(ConArgTypes)|Arities], Pos+1, Pos, ConArgTypes};
+            ({_, ConArgTypes}, {Arities, Pos, FoundPos, FoundArgs}) ->
+                {[length(ConArgTypes)|Arities], Pos+1, FoundPos, FoundArgs} end,
+        {[], 0, error, error}, Cons),
+    true = length(Args) =:= length(ConArgsT),
+    {variant, ConNum, [type_encode_aevm(Type, Arg) || {Type, Arg} <- lists:zip(ConArgsT, Args)]};
+type_encode_aevm(ACI_Type, Ast_Type) ->
+    io:format("Could not encode ~p as ~p for AEVM", [Ast_Type, ACI_Type]).
 
 -ifdef(TEST).
 generate_tests(EncodeCallCachePath, DecodeCallCachePath, ResPath) ->
@@ -309,6 +386,7 @@ generate_tests(EncodeCallCachePath, DecodeCallCachePath, ResPath) ->
     file:write_file(ResPath, io_lib:format("~s", [jsx:encode(R)])).
 
 to_bin(ok) -> <<"ok">>;
+to_bin(error) -> <<"error">>;
 to_bin(revert) -> <<"revert">>;
 to_bin(Bin) when is_binary(Bin) -> Bin;
 to_bin(Str) when is_list(Str) -> list_to_binary(Str).
