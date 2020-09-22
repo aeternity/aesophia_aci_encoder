@@ -1,3 +1,4 @@
+-ifdef(TEST).
 -module(aeaci_aci_tests).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -40,3 +41,5 @@ test_aevm_encoder_fixtures() ->
          end || {Aci, Tests} <- maps:to_list(Cases)]
      end || {_Ver, Cases} <- maps:to_list(AEVMFixtures)],
     ok.
+
+-endif.
