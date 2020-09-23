@@ -12,6 +12,7 @@ encoder_test_() ->
 
 fixtures_iris() ->
     aeaci_test_utils:fixture("tests_iris.json").
+
 fixtures_lima() ->
     aeaci_test_utils:fixture("tests_lima.json").
 
