@@ -27,7 +27,8 @@
     | address
     | contract
     | oracle_query_id
-    | unbound_var
+    | {unbound_var, binary()}
+    | function
     | oracle_id
     | {list, aci_typedef()}
     | {map, aci_typedef(), aci_typedef()}
@@ -115,8 +116,9 @@ unfold_type(Env, ScopeName, TypeName) when is_binary(TypeName) ->
         [<<"string">>] -> string;
         [<<"char">>] -> char;
         [<<"bool">>] -> bool;
-        [_] when First =:= $' ->
-            unbound_var;
+        [TVar] when First =:= $' ->
+            %% Fate Vm supports polimorphic entrypoints
+            {unbound_var, TVar};
         [_] when First >= $a andalso First =< $z ->
             {#scope{typedefs = Typedefs}, _} = maps:get(ScopeName, Env),
             %% If we have a non empty var list then the ACI is broken
@@ -124,7 +126,9 @@ unfold_type(Env, ScopeName, TypeName) when is_binary(TypeName) ->
             unfold_type(Env, ScopeName, do_type_substitution(ResolvedType, []));
         [_] ->
             %% Remote contract
-            {#scope{is_contract = true}, _} = maps:get(TypeName, Env),
+            %% Old ACI's didn't include remote contracts :P
+            %% TODO: optionally enable this check if the user wants
+            %%{#scope{is_contract = true}, _} = maps:get(TypeName, Env),
             contract;
         %% Chain TTL was in sophia since the beginning
         [<<"Chain">>, <<"ttl">>] ->
@@ -178,6 +182,11 @@ unfold_type(Env, ScopeName, TypeDef) when is_map(TypeDef), 1 =:= map_size(TypeDe
             option_t(unfold_type(Env, ScopeName, T1));
         <<"tuple">> ->
             {tuple, [unfold_type(Env, ScopeName, T) || T <- JSONTypeArgs]};
+        <<"function">> ->
+            %% Old compilers sometimes emitted bullshit in the ACI...
+            %% This entrypoint will be uncallable
+            %% but let's just leave it here as is :P
+            function;
         _ when is_binary(TypeName) ->
             %% Ok we encountered a general type substitution
             [Namespace, TName] = binary:split(TypeName, <<".">>),
@@ -186,7 +195,10 @@ unfold_type(Env, ScopeName, TypeDef) when is_map(TypeDef), 1 =:= map_size(TypeDe
             %% Ok we resolved the type, now do the substitution
             SubstitutedType = do_type_substitution(ResolvedType, JSONTypeArgs),
             unfold_type(Env, ScopeName, SubstitutedType)
-    end.
+    end;
+%% Old compilers
+unfold_type(Env, ScopeName, [TypeDef]) ->
+    unfold_type(Env, ScopeName, TypeDef).
 
 ttl_t() ->
     {variant, [{"RelativeTTL", [int]}, {"FixedTTL", [int]}]}.
@@ -247,6 +259,9 @@ apply_single_substitution_rule(#{<<"variant">> := Options1}, TName, TVal) ->
     #{<<"variant">> => Options2};
 apply_single_substitution_rule(#{<<"record">> := NamedArgs}, TName, TVal) ->
     #{<<"record">> => [#{<<"name">> => N, <<"type">> => change_if_equal(T, TName, TVal)} || #{<<"name">> := N, <<"type">> := T} <- NamedArgs]};
+apply_single_substitution_rule(#{<<"function">> := _} = T, _, _) ->
+    %% Old compilers...
+    T;
 apply_single_substitution_rule(Map, TName, TVal) when is_map(Map) ->
     maps:map(fun(_, Types) -> [change_if_equal(T, TName, TVal) || T <- Types] end, Map).
 

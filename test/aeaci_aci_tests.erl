@@ -10,15 +10,10 @@ encoder_test_() ->
     , { "Test AEVM encoder from ACI fixtures on Lima contracts", fun test_aevm_encoder_fixtures_lima/0}
     ].
 
-fixtures(What) ->
-    [B, _] = string:split(code:priv_dir(aesophia_aci_encoder), "_build"),
-    {ok, JText} = file:read_file(filename:join([B , "test", What])),
-    jsx:decode(JText, [{labels, binary}, return_maps]).
-
 fixtures_iris() ->
-    fixtures("tests_iris.json").
+    aeaci_test_utils:fixture("tests_iris.json").
 fixtures_lima() ->
-    fixtures("tests_lima.json").
+    aeaci_test_utils:fixture("tests_lima.json").
 
 test_fate_encoder_fixtures_iris() ->
      test_fate_encoder_fixtures(fixtures_iris()).
