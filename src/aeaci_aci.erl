@@ -304,7 +304,7 @@ encode_call_data(#contract_aci{scopes = Scopes, main_contract = ContractName, op
     end.
 
 %% Please note that polymorphic entrypoints are not a priority and they are SLOW
-%% Especially please avoid using polymorphic records or algebraic types...
+%% Especially please avoid using polymorphic records or algebraic data types...
 -spec type_encode_fate(aci_typedef(), ast_literal()) -> term().
 type_encode_fate(int, #ast_number{val = Val}) -> aeb_fate_data:make_integer(Val);
 type_encode_fate(bool, #ast_bool{val = Val}) -> aeb_fate_data:make_boolean(Val);
@@ -390,7 +390,8 @@ fate_type_inference(#ast_map{data = Map}) ->
     VT = fate_type_inference(#ast_list{args = Values}),
     {map, KT, VT};
 fate_type_inference(#ast_record{}) ->
-    error(not_supported);
+    io:format(user, "Polimorphism on records is currently unsupported", []),
+    error(not_yet_implemented);
 fate_type_inference(#ast_adt{con = #ast_con{namespace = Namespace, con = Name}, args = ArgList}) ->
     {tuple, Inferred} = fate_type_inference(ArgList),
     case {Namespace, Name, Inferred} of
@@ -401,7 +402,10 @@ fate_type_inference(#ast_adt{con = #ast_con{namespace = Namespace, con = Name}, 
         {[], "RelativeTTL", [int]} ->
             ttl_t();
         {[], "FixedTTL", [int]} ->
-            ttl_t()
+            ttl_t();
+        _ ->
+            io:format(user, "Polimorphism on Algebraic Data Types is currently unsupported", []),
+            error(not_yet_implemented)
     end.
 
 unify_types(Type, Type) -> Type;
