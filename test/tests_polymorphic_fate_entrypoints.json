@@ -1,0 +1,19 @@
+{
+  "encode": {
+    "fate": {
+      "6": {
+        "[{\"contract\":{\"functions\":[],\"name\":\"Remote\",\"payable\":false,\"type_defs\":[{\"name\":\"d\",\"typedef\":{\"record\":[{\"name\":\"z\",\"type\":\"string\"}]},\"vars\":[]},{\"name\":\"test\",\"typedef\":{\"variant\":[{\"A\":[]},{\"B\":[\"int\"]}]},\"vars\":[]}]}},{\"contract\":{\"functions\":[{\"arguments\":[{\"name\":\"a\",\"type\":\"'a\"}],\"name\":\"test\",\"payable\":false,\"returns\":\"'a\",\"stateful\":false}],\"name\":\"Test\",\"payable\":false,\"type_defs\":[{\"name\":\"test2\",\"typedef\":{\"variant\":[{\"C\":[]},{\"D\":[\"int\"]}]},\"vars\":[]},{\"name\":\"a\",\"typedef\":{\"record\":[{\"name\":\"x\",\"type\":\"int\"}]},\"vars\":[]},{\"name\":\"b\",\"typedef\":{\"record\":[{\"name\":\"x\",\"type\":\"'a\"}]},\"vars\":[{\"name\":\"'a\"}]},{\"name\":\"c\",\"typedef\":{\"record\":[{\"name\":\"y\",\"type\":\"int\"}]},\"vars\":[]}]}}]\n":
+        [ {"call": "test(1)", "calldata":  "cb_KxGSiyA2GwK9Ll1P"}
+        , {"call": "test([[[1,2,3]]])", "calldata": "cb_KxGSiyA2GxMTMwIEBlEYZtI="}
+        , {"call": "test([([1,2,3], [1])])", "calldata": "cb_KxGSiyA2GxMrMwIEBhMC58xf3A=="}
+        , {"call": "test(None)", "calldata": "cb_KxGSiyA2G6+CAAEAP/3zGaw="}
+        , {"call": "test(Some(20))", "calldata": "cb_KxGSiyA2G6+CAAEBGyitaVpd"}
+        , {"call": "test(RelativeTTL(20))", "calldata": "cb_KxGSiyA2G6+CAQEAGyhXS/mD"}
+        //, {"call": "test(C)", "calldata": "cb_KxGSiyA2G6+CAAEAP/3zGaw="}
+        //, {"call": "test(D(20))", "calldata": "cb_KxGSiyA2G6+CAAEBGyitaVpd"}
+        , {"call": "test(#20)", "calldata": "cb_KxGSiyA2G58BBSCeiZGu"}
+        ]
+      }
+    }
+  }
+}

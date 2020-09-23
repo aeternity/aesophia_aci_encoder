@@ -277,10 +277,15 @@ encode_call_data(#contract_aci{scopes = Scopes, main_contract = ContractName, op
     case maps:find(list_to_binary(What), Functions) of
         {ok, {ArgTypes, RetType}} when length(ArgTypes) =:= length(UserArgs) ->
             %% Great! We found what we want to call
-            %% Now we need to unfold typedefs and
             case maps:get(backend, Opts, fate) of
                 fate ->
-                    aeb_fate_abi:create_calldata(What, [type_encode_fate(T1, T2) || {T1, T2} <- lists:zip(ArgTypes, UserArgs)]);
+                    put(var_constrains, #{}),
+                    put(fresh_tvar, {unbound_var, 0}), %% User tvars use binaries :P
+                    try
+                        aeb_fate_abi:create_calldata(What, [type_encode_fate(T1, T2) || {T1, T2} <- lists:zip(ArgTypes, UserArgs)])
+                    after
+                        put(var_constrains, #{})
+                    end;
                 aevm ->
                     EncRetType = case {What, to_aevm_type(RetType)} of
                              {"init", E} ->
@@ -298,6 +303,8 @@ encode_call_data(#contract_aci{scopes = Scopes, main_contract = ContractName, op
             {error, list_to_binary(io_lib:format("Undefined function ~s/~p in contract ~s", [What, length(UserArgs), ContractName]))}
     end.
 
+%% Please note that polymorphic entrypoints are not a priority and they are SLOW
+%% Especially please avoid using polymorphic records or algebraic types...
 -spec type_encode_fate(aci_typedef(), ast_literal()) -> term().
 type_encode_fate(int, #ast_number{val = Val}) -> aeb_fate_data:make_integer(Val);
 type_encode_fate(bool, #ast_bool{val = Val}) -> aeb_fate_data:make_boolean(Val);
@@ -333,8 +340,109 @@ type_encode_fate({variant, Cons}, #ast_adt{con = #ast_con{namespace = _, con = C
     true = length(Args) =:= length(ConArgsT),
     aeb_fate_data:make_variant(lists:reverse(Ar), ConNum, list_to_tuple(
         [type_encode_fate(Type, Arg) || {Type, Arg} <- lists:zip(ConArgsT, Args)]));
+type_encode_fate({unbound_var, TVar1}, Ast) ->
+    case tvar_find(TVar1) of
+        {ok, {unbound_var, TVar2}} ->
+            case fate_type_inference(Ast) of
+                {unbound_var, _} ->
+                    %% Impossible as unpacking one AST record should always generate at least one literal type
+                    error(logic_error);
+                InferredType ->
+                    unify_types(InferredType, {unbound_var, TVar2}),
+                    type_encode_fate(InferredType, Ast)
+            end;
+        {ok, LiteralType} ->
+            type_encode_fate(LiteralType, Ast);
+        _ ->
+            case fate_type_inference(Ast) of
+                {unbound_var, _} ->
+                    %% Impossible as unpacking one AST record should always generate at least one literal type
+                    error(logic_error);
+                InferredType ->
+                    unify_types(InferredType, {unbound_var, TVar1}),
+                    type_encode_fate(InferredType, Ast)
+            end
+    end;
 type_encode_fate(ACI_Type, Ast_Type) ->
     io:format("Could not encode ~p as ~p for FATE VM", [Ast_Type, ACI_Type]).
+
+fate_type_inference(#ast_number{}) -> int;
+fate_type_inference(#ast_bool{}) -> bool;
+fate_type_inference(#ast_string{}) -> string;
+fate_type_inference(#ast_char{}) -> char;
+fate_type_inference(#ast_account{}) -> address;
+fate_type_inference(#ast_contract{}) -> contract;
+fate_type_inference(#ast_oracle{}) -> oracle_id;
+fate_type_inference(#ast_oracle_query{}) -> oracle_query_id;
+fate_type_inference(#ast_bytes{val = Bytes}) -> {bytes, byte_size(Bytes)};
+fate_type_inference(#ast_list{args = []}) ->
+    {list, fresh_tvar()};
+fate_type_inference(#ast_list{args = [H|T]}) ->
+    {list, lists:foldl(fun(El, Type) ->
+        unify_types(fate_type_inference(El), Type)
+                end, fate_type_inference(H), T)};
+fate_type_inference(#ast_tuple{args = Types}) ->
+    {tuple, [fate_type_inference(T) || T <- Types]};
+fate_type_inference(#ast_map{data = Map}) ->
+    Keys = maps:keys(Map),
+    Values = maps:values(Map),
+    KT = fate_type_inference(#ast_list{args = Keys}),
+    VT = fate_type_inference(#ast_list{args = Values}),
+    {map, KT, VT};
+fate_type_inference(#ast_record{}) ->
+    error(not_supported);
+fate_type_inference(#ast_adt{con = #ast_con{namespace = Namespace, con = Name}, args = ArgList}) ->
+    {tuple, Inferred} = fate_type_inference(ArgList),
+    case {Namespace, Name, Inferred} of
+        {[], "None", []} ->
+            option_t(fresh_tvar());
+        {[], "Some", [Type]} ->
+            option_t(Type);
+        {[], "RelativeTTL", [int]} ->
+            ttl_t();
+        {[], "FixedTTL", [int]} ->
+            ttl_t()
+    end.
+
+unify_types(Type, Type) -> Type;
+unify_types({unbound_var, T1}, {unbound_var, T2}) ->
+    tvar_union(T1, T2),
+    tvar_find(T1);
+unify_types({unbound_var, T}, Type) ->
+    case tvar_find(T) of
+        {unbound_var, Rep} ->
+            put(var_constrains, maps:put(Rep, Type, get(var_constrains))),
+            Type;
+        LiteralType ->
+            unify_types(LiteralType, Type)
+    end;
+unify_types(Type, {unbound_var, _} = T) ->
+    unify_types(T, Type).
+
+tvar_find(TVar1) ->
+    Constrains = get(var_constrains),
+    case maps:find(TVar1, Constrains) of
+        {ok, {unbound_var, TVar2}} ->
+            Res = tvar_find(TVar2),
+            put(var_constrains, maps:put(TVar1, Res, Constrains)),
+            Res;
+        {ok, FinalType} ->
+            FinalType;
+        _ ->
+            {unbound_var, TVar1}
+    end.
+tvar_union(TVar1, TVar2) ->
+    case {tvar_find(TVar1), tvar_find(TVar2)} of
+        {T, T} -> ok;
+        {{unbound_var, TVar}, Type} ->
+            put(var_constrains, maps:put(TVar, Type, get(var_constrains)));
+        {Type, {unbound_var, TVar}} ->
+            put(var_constrains, maps:put(TVar, Type, get(var_constrains)))
+    end.
+fresh_tvar() ->
+    {unbound_var, Ctr} = get(fresh_tvar),
+    put(fresh_tvar, {unbound_var, Ctr+1}),
+    {unbound_var, Ctr}.
 
 to_aevm_type(int) -> word;
 to_aevm_type(bool) -> word;

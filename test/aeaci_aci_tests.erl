@@ -8,6 +8,7 @@ encoder_test_() ->
     , { "Test AEVM encoder from ACI fixtures on Iris contracts", fun test_aevm_encoder_fixtures_iris/0}
     , { "Test FATE encoder from ACI fixtures on Lima contracts", fun test_fate_encoder_fixtures_lima/0}
     , { "Test AEVM encoder from ACI fixtures on Lima contracts", fun test_aevm_encoder_fixtures_lima/0}
+    , { "Test encoder with polymorphic FATE entrypoints", fun test_polymorphic_fate_entrypoints/0}
     ].
 
 fixtures_iris() ->
@@ -27,6 +28,9 @@ test_fate_encoder_fixtures_lima() ->
 
 test_aevm_encoder_fixtures_lima() ->
     test_aevm_encoder_fixtures(fixtures_lima()).
+
+test_polymorphic_fate_entrypoints() ->
+    test_fate_encoder_fixtures(aeaci_test_utils:fixture("tests_polymorphic_fate_entrypoints.json")).
 
 test_fate_encoder_fixtures(#{<<"encode">> := #{<<"fate">> := FateFixtures}}) ->
     [begin
