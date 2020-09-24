@@ -150,8 +150,9 @@ unfold_type(Env, ScopeName, TypeName) when is_binary(TypeName) ->
         [<<"AENS">>, <<"name">>] ->
             {variant, [{"Name", [address, ttl_t(), {map, string, pointee_t()}]}]};
         %% Fancy crypto primitives
-        %%[<<"MCL_BLS12_381">>, <<"fr">>] -> error("no constructor");
-        %%[<<"MCL_BLS12_381">>, <<"fp">>] -> error("no constructor");
+        [<<"MCL_BLS12_381">>, <<"fr">>] -> {bytes, 32};
+        [<<"MCL_BLS12_381">>, <<"fp">>] -> {bytes, 48};
+        %% User defined type
         [Namespace, Typename] -> unfold_type(Env, Namespace, Typename)
     end;
 unfold_type(Env, ScopeName, TypeDef) when is_map(TypeDef), 1 =:= map_size(TypeDef) ->
