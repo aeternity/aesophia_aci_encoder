@@ -272,7 +272,7 @@ change_if_equal(T, _, _) -> T.
 encode_call_data(#contract_aci{} = Aci, Call) when is_binary(Call) ->
     encode_call_data(Aci, binary_to_list(Call));
 encode_call_data(#contract_aci{scopes = Scopes, main_contract = ContractName, opts = Opts}, Call) when is_list(Call) ->
-    Tokens = aeaci_lexer:string(Call),
+    {ok, Tokens} = aeaci_lexer:string(Call),
     #ast_call{what = #ast_id{namespace = [], id = What}, args = #ast_tuple{args = UserArgs}} = aeaci_parser:parse_call(Tokens),
     #scope{functions = Functions} = maps:get(ContractName, Scopes),
     case maps:find(list_to_binary(What), Functions) of

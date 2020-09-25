@@ -24,6 +24,8 @@
     | record_start
     | record_end
     | minus_sign
+    | multiply
+    | type_annotation
     | {con, string()}
     | {id, string()}
     | {string, string()}
@@ -35,12 +37,14 @@
     | comma
     | equal.
 
--export_type([lex_token/0]).
+-type pos() :: integer().
 
--spec string(string()) -> {error, term()} | [lex_token()].
+-export_type([lex_token/0, pos/0]).
+
+-spec string(string()) -> {error, term()} | [{lex_token(), pos()}].
 %% TODO: Nice error messsages :P
 string(String) ->
-  skip_whitespace(String, [], []).
+  skip_whitespace(String, [], [], 0).
 
 -define(IS_FORBIDDEN_CHAR(CHAR), (CHAR =:= $\n)).
 -define(IS_FORBIDDEN_OP(CHAR), (
@@ -69,159 +73,175 @@ string(String) ->
 -define(IS_CON(CHAR), ?IS_UPPER(CHAR); ?IS_LOWER(CHAR); ?IS_DIGIT(CHAR); CHAR =:= $_).
 -define(IS_ID(CHAR), ?IS_CON(CHAR); CHAR =:= $').
 
+-define(skip_whitespace(String, Stack, Acc), ?skip_whitespace(String, Stack, Acc, 1)).
+-define(skip_whitespace(String, Stack, Acc, Delta), skip_whitespace(String, Stack, Acc, N+Delta)).
+-define(lex_string_(State, String, Stack, Acc), ?lex_string_(State, String, Stack, Acc, 1)).
+-define(lex_string_(State, String, Stack, Acc, Delta), lex_string_(State, String, Stack, Acc, N+Delta)).
+-define(emit(Token, List), [{Token, N}|List]).
+
 %% Skips whitespaces
-skip_whitespace([], Stack, Acc) ->
-    lex_string_(dispatch, [], Stack, Acc);
-skip_whitespace([Char | _], _Stack, _Acc) when ?IS_FORBIDDEN_CHAR(Char) ->
+skip_whitespace([], Stack, Acc, N) ->
+    ?lex_string_(dispatch, [], Stack, Acc, 0);
+skip_whitespace([Char | _] = Rest, _Stack, _Acc, N) when ?IS_FORBIDDEN_CHAR(Char) ->
     {error, forbidden_char};
-skip_whitespace([Char | String], Stack, Acc) when ?IS_WS(Char) ->
-    skip_whitespace(String, Stack, Acc);
-skip_whitespace(String, Stack, Acc) ->
-    lex_string_(dispatch, String, Stack, Acc).
+skip_whitespace([Char | String], Stack, Acc, N) when ?IS_WS(Char) ->
+    ?skip_whitespace(String, Stack, Acc);
+skip_whitespace(String, Stack, Acc, N) ->
+    ?lex_string_(dispatch, String, Stack, Acc, 0).
 
 %% Just hardcode a state machine :)
 %% States: dispatch, comment, string, char, int, hex, bytes, id, con
 
 %% Forbidden chars in a one line call expression - forbid them - there is no place for them
 %% when encoding call data
-lex_string_(_, [Char | _], _Stack, _Acc) when ?IS_FORBIDDEN_CHAR(Char) ->
+lex_string_(_, [Char | _], _Stack, _Acc, N) when ?IS_FORBIDDEN_CHAR(Char) ->
     {error, forbidden_char};
 
 %% Dispatch lexing operation
-lex_string_(dispatch, [], [], Acc) -> %% Lexing done
-    lists:reverse(Acc);
-lex_string_(dispatch, [], _Stack, _Acc) -> %% Unmatched parantheses/braces/etc...
+lex_string_(dispatch, [], [], Acc, _N) -> %% Lexing done
+    {ok, lists:reverse(Acc)};
+lex_string_(dispatch, [], _Stack, _Acc, N) -> %% Unmatched parantheses/braces/etc...
     {error, unmatched_parantheses};
 %% Parantheses
-lex_string_(dispatch, [$( | String], Stack, Acc) ->
-    skip_whitespace(String, [paren_start | Stack], [paren_start | Acc]);
-lex_string_(dispatch, [$) | String], [paren_start | Stack], Acc) ->
-    skip_whitespace(String, Stack, [paren_end | Acc]);
-lex_string_(dispatch, [$) | _], _Stack, _Acc) ->
+lex_string_(dispatch, [$( | String], Stack, Acc, N) ->
+    ?skip_whitespace(String, ?emit(paren_start, Stack), ?emit(paren_start, Acc));
+lex_string_(dispatch, [$) | String], [{paren_start, _} | Stack], Acc, N) ->
+    ?skip_whitespace(String, Stack, ?emit(paren_end, Acc));
+lex_string_(dispatch, [$) | _], _Stack, _Acc, N) ->
     {error, unmatched_parantheses};
 %% Lists
-lex_string_(dispatch, [$[ | String], Stack, Acc) ->
-    skip_whitespace(String, [list_start | Stack], [list_start | Acc]);
-lex_string_(dispatch, [$] | String], [list_start | Stack], Acc) ->
-    skip_whitespace(String, Stack, [list_end | Acc]);
-lex_string_(dispatch, [$] | _], _Stack, _Acc) ->
+lex_string_(dispatch, [$[ | String], Stack, Acc, N) ->
+    ?skip_whitespace(String, ?emit(list_start, Stack), ?emit(list_start, Acc));
+lex_string_(dispatch, [$] | String], [{list_start, _} | Stack], Acc, N) ->
+    ?skip_whitespace(String, Stack, ?emit(list_end, Acc));
+lex_string_(dispatch, [$] | _], _Stack, _Acc, N) ->
     {error, unmatched_list};
 %% Records/Maps
-lex_string_(dispatch, [${ | String], Stack, Acc) ->
-    skip_whitespace(String, [record_start | Stack], [record_start | Acc]);
-lex_string_(dispatch, [$} | String], [record_start | Stack], Acc) ->
-    skip_whitespace(String, Stack, [record_end | Acc]);
-lex_string_(dispatch, [$} | _], _Stack, _Acc) ->
+lex_string_(dispatch, [${ | String], Stack, Acc, N) ->
+    ?skip_whitespace(String, ?emit(record_start, Stack), ?emit(record_start, Acc));
+lex_string_(dispatch, [$} | String], [{record_start, _} | Stack], Acc, N) ->
+    ?skip_whitespace(String, Stack, ?emit(record_end, Acc));
+lex_string_(dispatch, [$} | _], _Stack, _Acc, N) ->
     {error, unmatched_record};
 %% Comment start
-lex_string_(dispatch, [$/, $/ | _], _Stack, _Acc) ->
+lex_string_(dispatch, [$/, $/ | _], _Stack, _Acc, N) ->
     {error, forbidden_comment};
-lex_string_(dispatch, [$/, $* | String], Stack, Acc) ->
-    lex_string_(comment, String, Stack, Acc);
+lex_string_(dispatch, [$/, $* | String], Stack, Acc, N) ->
+    ?lex_string_(comment, String, Stack, Acc, 2);
 %% Lambdas
-lex_string_(dispatch, [$=, $> | _], _Stack, _Acc) ->
+lex_string_(dispatch, [$=, $> | _], _Stack, _Acc, N) ->
     {error, forbidden_lambda};
 %% Expr
-lex_string_(dispatch, [$- | String], Stack, Acc) ->
-    skip_whitespace(String, Stack, [minus_sign | Acc]);
-lex_string_(dispatch, [$. | String], Stack, [{con, _} | _] = Acc) ->
-    skip_whitespace(String, Stack, [dot | Acc]);
-lex_string_(dispatch, [$. | _], _Stack, _Acc) ->
+lex_string_(dispatch, [$- | _], _Stack, [{minus_sign, _} | _], N) ->
     {error, forbidden_expr};
-lex_string_(dispatch, [$, | _], _Stack, [Top | _]) when Top =:= dot; Top =:= comma ->
+lex_string_(dispatch, [$- | String], Stack, Acc, N) ->
+    ?skip_whitespace(String, Stack, ?emit(minus_sign, Acc));
+lex_string_(dispatch, [$: | _], _Stack, [{type_annotation, _} | _], N) ->
     {error, forbidden_expr};
-lex_string_(dispatch, [$, | String], Stack, Acc) ->
-    skip_whitespace(String, Stack, [comma | Acc]);
-lex_string_(dispatch, [$= | String], Stack, [{id, _} | _] = Acc) ->
-    skip_whitespace(String, Stack, [equal | Acc]);
-lex_string_(dispatch, [$= | String], Stack, [list_end | _] = Acc) ->
-    skip_whitespace(String, Stack, [equal | Acc]);
-lex_string_(dispatch, [$= | _], _Stack, _Acc) ->
+lex_string_(dispatch, [$: | String], Stack, Acc, N) ->
+    ?skip_whitespace(String, Stack, ?emit(type_annotation, Acc));
+lex_string_(dispatch, [$* | _], _Stack, [{multiply, _} | _], N) ->
     {error, forbidden_expr};
-lex_string_(dispatch, [Char | _], _Stack, _Acc) when ?IS_FORBIDDEN_OP(Char) ->
+lex_string_(dispatch, [$* | String], Stack, Acc, N) ->
+    ?skip_whitespace(String, Stack, ?emit(multiply, Acc));
+lex_string_(dispatch, [$. | String], Stack, [{{con, _}, _} | _] = Acc, N) ->
+    ?skip_whitespace(String, Stack, ?emit(dot, Acc));
+lex_string_(dispatch, [$. | _], _Stack, _Acc, N) ->
+    {error, forbidden_expr};
+lex_string_(dispatch, [$, | _], _Stack, [{Top, _} | _], N) when Top =:= dot; Top =:= comma ->
+    {error, forbidden_expr};
+lex_string_(dispatch, [$, | String], Stack, Acc, N) ->
+    ?skip_whitespace(String, Stack, ?emit(comma, Acc));
+lex_string_(dispatch, [$= | String], Stack, [{{id, _}, _} | _] = Acc, N) ->
+    ?skip_whitespace(String, Stack, ?emit(equal, Acc));
+lex_string_(dispatch, [$= | String], Stack, [{list_end, _} | _] = Acc, N) ->
+    ?skip_whitespace(String, Stack, ?emit(equal, Acc));
+lex_string_(dispatch, [$= | _], _Stack, _Acc, N) ->
+    {error, forbidden_expr};
+lex_string_(dispatch, [Char | _], _Stack, _Acc, N) when ?IS_FORBIDDEN_OP(Char) ->
     {error, forbidden_expr};
 %% Hex
-lex_string_(dispatch, [$0, $x | [Char | _] = String], Stack, Acc) when ?IS_HEXDIGIT(Char) ->
-    lex_string_(hex, String, Stack, [{hex, 0} |  Acc]);
+lex_string_(dispatch, [$0, $x | [Char | _] = String], Stack, Acc, N) when ?IS_HEXDIGIT(Char) ->
+    ?lex_string_(hex, String, Stack, ?emit({hex, 0}, Acc), 2);
 %% Integer
-lex_string_(dispatch, [Char | _] = String, Stack, Acc) when ?IS_DIGIT(Char) ->
-    lex_string_(int, String, Stack, [{int, 0} | Acc]);
+lex_string_(dispatch, [Char | _] = String, Stack, Acc, N) when ?IS_DIGIT(Char) ->
+    ?lex_string_(int, String, Stack, ?emit({int, 0}, Acc), 0);
 %% Bytes
-lex_string_(dispatch, [$# | [Char | _] = String], Stack, Acc) when ?IS_HEXDIGIT(Char) ->
-    lex_string_(bytes, String, Stack, [{int, 0, 0} | Acc]);
+lex_string_(dispatch, [$# | [Char | _] = String], Stack, Acc, N) when ?IS_HEXDIGIT(Char) ->
+    ?lex_string_(bytes, String, Stack, ?emit({int, 0, 0}, Acc));
 %% Con
-lex_string_(dispatch, [Char | String], Stack, Acc) when ?IS_UPPER(Char) ->
-    lex_string_(con, String, Stack, [{con, [Char]} | Acc]);
+lex_string_(dispatch, [Char | String], Stack, Acc, N) when ?IS_UPPER(Char) ->
+    ?lex_string_(con, String, Stack, ?emit({con, [Char]}, Acc));
 %% Id
-lex_string_(dispatch, [Char | String], Stack, Acc) when ?IS_LOWER(Char) ->
-    lex_string_(id, String, Stack, [{id, [Char]} | Acc]);
+lex_string_(dispatch, [Char | String], Stack, Acc, N) when ?IS_LOWER(Char) ->
+    ?lex_string_(id, String, Stack, ?emit({id, [Char]}, Acc));
 %% String
-lex_string_(dispatch, [$" | String], Stack, Acc) ->
-    lex_string_(string, String, Stack, [{string, []} | Acc]);
+lex_string_(dispatch, [$" | String], Stack, Acc, N) ->
+    ?lex_string_(string, String, Stack, ?emit({string, []}, Acc));
 %% Char
-lex_string_(dispatch, [$' | String], Stack, Acc) ->
-    lex_string_(char, String, Stack, Acc);
+lex_string_(dispatch, [$' | String], Stack, Acc, N) ->
+    ?lex_string_(char, String, Stack, Acc);
 
 %% Comment handling
-lex_string_(comment, [$*, $/ | String], Stack, Acc) ->
-    skip_whitespace(String, Stack, Acc);
-lex_string_(comment, [_ | String], Stack, Acc) ->
-    lex_string_(comment, String, Stack, Acc);
+lex_string_(comment, [$*, $/ | String], Stack, Acc, N) ->
+    ?skip_whitespace(String, Stack, Acc, 2);
+lex_string_(comment, [_ | String], Stack, Acc, N) ->
+    ?lex_string_(comment, String, Stack, Acc);
 
 %% Integer handling
-lex_string_(int, [Char | String], Stack, [{int, Val}|Acc]) when ?IS_DIGIT(Char) ->
-    lex_string_(int, String, Stack, [{int, Val*10 + Char - $0} | Acc]);
-lex_string_(int, [$_ | [Char | _] = String], Stack, Acc) when ?IS_DIGIT(Char) ->
-    lex_string_(int, String, Stack, Acc);
-lex_string_(int, [$_ | _], _Stack, _Acc) ->
+lex_string_(int, [Char | String], Stack, [{{int, Val}, Pos}|Acc], N) when ?IS_DIGIT(Char) ->
+    ?lex_string_(int, String, Stack, [{{int, Val*10 + Char - $0}, Pos} | Acc]);
+lex_string_(int, [$_ | [Char | _] = String], Stack, Acc, N) when ?IS_DIGIT(Char) ->
+    ?lex_string_(int, String, Stack, Acc);
+lex_string_(int, [$_ | _], _Stack, _Acc, N) ->
     {error, wrong_number};
-lex_string_(int, String, Stack, [{int, Val}, minus_sign | Acc]) ->
-    skip_whitespace(String, Stack, [{int, -Val} | Acc]);
-lex_string_(int, String, Stack, Acc) ->
-    skip_whitespace(String, Stack, Acc);
+lex_string_(int, String, Stack, [{{int, Val}, Pos}, {minus_sign, _} | Acc], N) ->
+    ?skip_whitespace(String, Stack, [{{int, -Val}, Pos} | Acc], 0);
+lex_string_(int, String, Stack, Acc, N) ->
+    ?skip_whitespace(String, Stack, Acc, 0);
 
 %% Hex handling
-lex_string_(hex, [Char | String], Stack, [{hex, Val}|Acc]) when ?IS_HEXDIGIT(Char) ->
-    lex_string_(hex, String, Stack, [{hex, Val*16 + hex_char_to_val(Char)} | Acc]);
-lex_string_(hex, [$_ | [Char | _] = String], Stack, Acc) when ?IS_HEXDIGIT(Char) ->
-    lex_string_(hex, String, Stack, Acc);
-lex_string_(hex, [$_ | _], _Stack, _Acc) ->
+lex_string_(hex, [Char | String], Stack, [{{hex, Val}, Pos}|Acc], N) when ?IS_HEXDIGIT(Char) ->
+    ?lex_string_(hex, String, Stack, [{{hex, Val*16 + hex_char_to_val(Char)}, Pos} | Acc]);
+lex_string_(hex, [$_ | [Char | _] = String], Stack, Acc, N) when ?IS_HEXDIGIT(Char) ->
+    ?lex_string_(hex, String, Stack, Acc);
+lex_string_(hex, [$_ | _], _Stack, _Acc, N) ->
     {error, wrong_number};
-lex_string_(hex, String, Stack, [{hex, Val}, minus_sign | Acc]) ->
-    skip_whitespace(String, Stack, [{hex, -Val} | Acc]);
-lex_string_(hex, String, Stack, Acc) ->
-    skip_whitespace(String, Stack, Acc);
+lex_string_(hex, String, Stack, [{{hex, Val}, Pos}, {minus_sign, _} | Acc], N) ->
+    ?skip_whitespace(String, Stack, [{{hex, -Val}, Pos} | Acc], 0);
+lex_string_(hex, String, Stack, Acc, N) ->
+    ?skip_whitespace(String, Stack, Acc, 0);
 
 %% Bytes handling
-lex_string_(bytes, [Char | String], Stack, [{int, Val, Len} | Acc]) when ?IS_HEXDIGIT(Char) ->
-    lex_string_(bytes, String, Stack, [{int, Val*16 + hex_char_to_val(Char), Len + 1} | Acc]);
-lex_string_(bytes, [$_ | [Char | _] = String], Stack, Acc) when ?IS_HEXDIGIT(Char) ->
-    lex_string_(hex, String, Stack, Acc);
-lex_string_(bytes, [$_ | _], _Stack, _Acc) ->
+lex_string_(bytes, [Char | String], Stack, [{{int, Val, Len}, Pos} | Acc], N) when ?IS_HEXDIGIT(Char) ->
+    ?lex_string_(bytes, String, Stack, [{{int, Val*16 + hex_char_to_val(Char), Len + 1}, Pos} | Acc]);
+lex_string_(bytes, [$_ | [Char | _] = String], Stack, Acc, N) when ?IS_HEXDIGIT(Char) ->
+    ?lex_string_(hex, String, Stack, Acc);
+lex_string_(bytes, [$_ | _], _Stack, _Acc, N) ->
     {error, wrong_number};
-lex_string_(bytes, String, Stack, [{int, Val, Len} | Acc]) ->
+lex_string_(bytes, String, Stack, [{{int, Val, Len}, Pos} | Acc], N) ->
     Digits = (Len + 1) div 2,
-    skip_whitespace(String, Stack, [{bytes, <<Val:Digits/unit:8>>} | Acc]);
+    ?skip_whitespace(String, Stack, [{{bytes, <<Val:Digits/unit:8>>}, Pos} | Acc], 0);
 
 %% Con
-lex_string_(con, [Char | String], Stack, [{con, Con} | Acc]) when ?IS_CON(Char) ->
-    lex_string_(con, String, Stack, [{con, [Char | Con]} | Acc]);
-lex_string_(con, String, Stack, [{con, Con} | Acc]) ->
-    skip_whitespace(String, Stack, [{con, lists:reverse(Con)} | Acc]);
+lex_string_(con, [Char | String], Stack, [{{con, Con}, Pos} | Acc], N) when ?IS_CON(Char) ->
+    ?lex_string_(con, String, Stack, [{{con, [Char | Con]}, Pos} | Acc]);
+lex_string_(con, String, Stack, [{{con, Con}, Pos} | Acc], N) ->
+    ?skip_whitespace(String, Stack, [{{con, lists:reverse(Con)}, Pos} | Acc], 0);
 
 %% Id
-lex_string_(id, [Char | String], Stack, [{id, Id} | Acc]) when ?IS_ID(Char) ->
-    lex_string_(id, String, Stack, [{id, [Char | Id]} | Acc]);
-lex_string_(id, String, Stack, [{id, Id} | Acc]) ->
-    skip_whitespace(String, Stack, [{id, lists:reverse(Id)} | Acc]);
+lex_string_(id, [Char | String], Stack, [{{id, Id}, Pos} | Acc], N) when ?IS_ID(Char) ->
+    ?lex_string_(id, String, Stack, [{{id, [Char | Id]}, Pos} | Acc]);
+lex_string_(id, String, Stack, [{{id, Id}, Pos} | Acc], N) ->
+    ?skip_whitespace(String, Stack, [{{id, lists:reverse(Id)}, Pos} | Acc], 0);
 
 %% String
-lex_string_(string, [$" | String], Stack, [{string, S} | Acc]) ->
-    skip_whitespace(String, Stack, [{string, lists:reverse(S)} | Acc]);
-lex_string_(string, [$\\, $x, D1, D2 | String], Stack, [{string, S} | Acc]) ->
+lex_string_(string, [$" | String], Stack, [{{string, S}, Pos} | Acc], N) ->
+    ?skip_whitespace(String, Stack, [{{string, lists:reverse(S)}, Pos} | Acc]);
+lex_string_(string, [$\\, $x, D1, D2 | String], Stack, [{{string, S}, Pos} | Acc], N) ->
     C = list_to_integer([D1, D2], 16),
-    lex_string_(string, String, Stack, [{string, [C | S]} | Acc]);
-lex_string_(string, [$\\, Code | String], Stack, [{string, S} | Acc]) ->
+    ?lex_string_(string, String, Stack, [{{string, [C | S]}, Pos} | Acc], 4);
+lex_string_(string, [$\\, Code | String], Stack, [{{string, S}, Pos} | Acc], N) ->
     Char = case Code of
         $'  -> $';
         $\\ -> $\\;
@@ -238,13 +258,13 @@ lex_string_(string, [$\\, Code | String], Stack, [{string, S} | Acc]) ->
         {error, _} = Err ->
             Err;
         _ ->
-            lex_string_(string, String, Stack, [{string, [Char | S]} | Acc])
+            ?lex_string_(string, String, Stack, [{{string, [Char | S]}, Pos} | Acc], 2)
     end;
-lex_string_(string, [Char | String], Stack, [{string, S} | Acc]) ->
-    lex_string_(string, String, Stack, [{string, [Char | S]} | Acc]);
+lex_string_(string, [Char | String], Stack, [{{string, S}, Pos} | Acc], N) ->
+    ?lex_string_(string, String, Stack, [{{string, [Char | S]}, Pos} | Acc]);
 
 %% Char
-lex_string_(char, [$\\, Code, $' | String], Stack, Acc) ->
+lex_string_(char, [$\\, Code, $' | String], Stack, Acc, N) ->
     Char = case Code of
         $'  -> $';
         $\\ -> $\\;
@@ -261,10 +281,10 @@ lex_string_(char, [$\\, Code, $' | String], Stack, Acc) ->
         {error, _} = Err ->
             Err;
         _ ->
-            skip_whitespace(String, Stack, [{char, Char} | Acc])
+            ?skip_whitespace(String, Stack, ?emit({char, Char}, Acc), 3)
     end;
-lex_string_(char, [Char, $' | String], Stack, Acc) ->
-    skip_whitespace(String, Stack, [{char, Char} | Acc]).
+lex_string_(char, [Char, $' | String], Stack, Acc, N) ->
+    ?skip_whitespace(String, Stack, ?emit({char, Char}, Acc), 2).
 
 hex_char_to_val(Char) when ?IS_DIGIT(Char) ->
     Char - $0;
