@@ -269,10 +269,18 @@ apply_single_substitution_rule(Map, TName, TVal) when is_map(Map) ->
 change_if_equal(T, T, TVal) -> TVal;
 change_if_equal(T, _, _) -> T.
 
+-spec encode_call_data(#contract_aci{}, binary() | string()) -> {ok, binary()} | {error, term()}.
 encode_call_data(#contract_aci{} = Aci, Call) when is_binary(Call) ->
     encode_call_data(Aci, binary_to_list(Call));
-encode_call_data(#contract_aci{scopes = Scopes, main_contract = ContractName, opts = Opts}, Call) when is_list(Call) ->
-    {ok, Tokens} = aeaci_lexer:string(Call),
+encode_call_data(#contract_aci{} = Aci, Call) when is_list(Call) ->
+    case aeaci_lexer:string(Call) of
+        {ok, Tokens} ->
+            encode_call_data_tokens(Aci, Tokens);
+        {error, _} = Err ->
+            Err
+    end.
+
+encode_call_data_tokens(#contract_aci{scopes = Scopes, main_contract = ContractName, opts = Opts}, Tokens) ->
     #ast_call{what = #ast_id{namespace = [], id = What}, args = #ast_tuple{args = UserArgs}} = aeaci_parser:parse_call(Tokens),
     #scope{functions = Functions} = maps:get(ContractName, Scopes),
     case maps:find(list_to_binary(What), Functions) of
@@ -344,28 +352,18 @@ type_encode_fate({variant, Cons}, #ast_adt{con = #ast_con{namespace = _, con = C
 type_encode_fate({unbound_var, TVar1}, Ast) ->
     case tvar_find(TVar1) of
         {ok, {unbound_var, TVar2}} ->
-            case fate_type_inference(Ast) of
-                {unbound_var, _} ->
-                    %% Impossible as unpacking one AST record should always generate at least one literal type
-                    error(logic_error);
-                InferredType ->
-                    unify_types(InferredType, {unbound_var, TVar2}),
-                    type_encode_fate(InferredType, Ast)
-            end;
+            InferredType = fate_type_inference(Ast),
+            unify_types(InferredType, {unbound_var, TVar2}),
+            type_encode_fate(InferredType, Ast);
         {ok, LiteralType} ->
             type_encode_fate(LiteralType, Ast);
         _ ->
-            case fate_type_inference(Ast) of
-                {unbound_var, _} ->
-                    %% Impossible as unpacking one AST record should always generate at least one literal type
-                    error(logic_error);
-                InferredType ->
-                    unify_types(InferredType, {unbound_var, TVar1}),
-                    type_encode_fate(InferredType, Ast)
-            end
+            InferredType = fate_type_inference(Ast),
+            unify_types(InferredType, {unbound_var, TVar1}),
+            type_encode_fate(InferredType, Ast)
     end;
 type_encode_fate(ACI_Type, Ast_Type) ->
-    io:format("Could not encode ~p as ~p for FATE VM", [Ast_Type, ACI_Type]).
+    {error, io_lib:format("Could not encode ~p as ~p for FATE VM", [Ast_Type, ACI_Type])}.
 
 fate_type_inference(#ast_number{}) -> int;
 fate_type_inference(#ast_bool{}) -> bool;
@@ -463,7 +461,9 @@ to_aevm_type({list, TDef}) -> {list, to_aevm_type(TDef)};
 to_aevm_type({map, TK, TV}) -> {map, to_aevm_type(TK), to_aevm_type(TV)};
 to_aevm_type({tuple, TDefs}) -> {tuple, [to_aevm_type(T) || T <- TDefs]};
 to_aevm_type({variant, Cons}) -> {variant, [[to_aevm_type(T) || T <- TDefs] || {_, TDefs} <- Cons]};
-to_aevm_type({record, TDefs}) -> {tuple,[to_aevm_type(T) || {_, T} <- TDefs]}.
+to_aevm_type({record, TDefs}) -> {tuple,[to_aevm_type(T) || {_, T} <- TDefs]};
+to_aevm_type(Type) ->
+    {error, io_lib:format("Could not translate ~p as to AEVM type", [Type])}.
 
 -spec type_encode_aevm(aci_typedef(), ast_literal()) -> term().
 type_encode_aevm(int, #ast_number{val = Val}) -> Val;
@@ -503,7 +503,7 @@ type_encode_aevm({variant, Cons}, #ast_adt{con = #ast_con{namespace = _, con = C
     true = length(Args) =:= length(ConArgsT),
     {variant, ConNum, [type_encode_aevm(Type, Arg) || {Type, Arg} <- lists:zip(ConArgsT, Args)]};
 type_encode_aevm(ACI_Type, Ast_Type) ->
-    io:format("Could not encode ~p as ~p for AEVM", [Ast_Type, ACI_Type]).
+    {error, io_lib:format("Could not encode ~p as ~p for AEVM", [Ast_Type, ACI_Type])}.
 
 -ifdef(TEST).
 generate_tests(EncodeCallCachePath, DecodeCallCachePath, ResPath) ->

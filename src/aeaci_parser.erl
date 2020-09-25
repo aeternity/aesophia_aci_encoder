@@ -13,7 +13,8 @@
 
 -include("aeaci_ast.hrl").
 
--spec parse_call([{aeaci_lexer:lex_token(), aeaci_lexer:pos()}]) -> #ast_call{} | {error, term()}.
+-type token_list() :: [{aeaci_lexer:lex_token(), aeaci_lexer:pos()}].
+-spec parse_call(token_list()) -> #ast_call{} | {error, term()}.
 parse_call(Tokens1) ->
     {#ast_id{namespace = []} = Name, [{paren_start, _} | Tokens2]} = parse_id_or_con(Tokens1),
     case parse_tuple(Tokens2) of
@@ -25,7 +26,7 @@ parse_call(Tokens1) ->
             {error, "Leftover tokens in entrypoint call"}
     end.
 
--spec parse_id_or_con([{aeaci_lexer:lex_token(), aeaci_lexer:pos()}]) -> {#ast_id{} | #ast_con{}, [{aeaci_lexer:lex_token(), aeaci_lexer:pos()}]}.
+-spec parse_id_or_con(token_list()) -> {#ast_id{} | #ast_con{}, token_list()}.
 parse_id_or_con(Tokens1) ->
     {[_|_] = Names, Tokens2} =
     lists:splitwith(fun({{con, _}, _}) -> true; ({{id, _}, _}) -> true; ({dot, _}) -> true; (_) -> false end, Tokens1),
@@ -39,7 +40,7 @@ parse_id_or_con(Tokens1) ->
             {#ast_id{namespace = Qualifiers, id = Name}, Tokens2}
     end.
 
--spec parse_literal([{aeaci_lexer:lex_token(), aeaci_lexer:pos()}]) -> {ast_literal(), [{aeaci_lexer:lex_token(), aeaci_lexer:pos()}]}.
+-spec parse_literal(token_list()) -> {ast_literal(), token_list()}.
 parse_literal([{{int, Number}, _} | Tokens]) ->
     {#ast_number{val = Number}, Tokens};
 parse_literal([{{hex, Number}, _} | Tokens]) ->
@@ -96,7 +97,7 @@ parse_literal([{{Type, _}, _} | _] = Tokens1) when Type =:= con; Type =:= id ->
             {#ast_adt{con = Constructor, args = #ast_tuple{args = []}}, Tokens2}
     end.
 
--spec parse_tuple([{aeaci_lexer:lex_token(), aeaci_lexer:pos()}]) -> {ast_literal(), [{aeaci_lexer:lex_token(), aeaci_lexer:pos()}]}.
+-spec parse_tuple(token_list()) -> {ast_literal(), token_list()}.
 %% One tuples automatically reduce to literals
 parse_tuple([{paren_end, _} | Tokens]) ->
     {#ast_tuple{args = []}, Tokens};
@@ -114,7 +115,7 @@ parse_tuple(Tokens1) ->
             {#ast_tuple{args = [LiteralAst, Tuple]}, Tokens3}
     end.
 
--spec parse_list([{aeaci_lexer:lex_token(), aeaci_lexer:pos()}]) -> {#ast_list{}, [{aeaci_lexer:lex_token(), aeaci_lexer:pos()}]}.
+-spec parse_list(token_list()) -> {#ast_list{}, token_list()}.
 parse_list([{list_end, _} | Tokens]) ->
     {#ast_list{args = []}, Tokens};
 parse_list([{comma, _} | Tokens]) ->
@@ -124,7 +125,7 @@ parse_list(Tokens1) ->
     {#ast_list{args = List}, Tokens3} = parse_list(Tokens2),
     {#ast_list{args = [LiteralAst | List]}, Tokens3}.
 
--spec parse_map([aeaci_lexer:lex_token()]) -> {#ast_map{}, [{aeaci_lexer:lex_token(), aeaci_lexer:pos()}]}.
+-spec parse_map(token_list()) -> {#ast_map{}, token_list()}.
 parse_map([{record_end, _} | Tokens]) ->
     {#ast_map{data = #{}}, Tokens};
 parse_map([{comma, _}, {list_start, _} | Tokens]) ->
@@ -135,7 +136,7 @@ parse_map(Tokens1) ->
     {#ast_map{data = Map}, Tokens4} = parse_map(Tokens3),
     {#ast_map{data = maps:put(KeyAst, ValueAst, Map)}, Tokens4}.
 
--spec parse_record([{aeaci_lexer:lex_token(), aeaci_lexer:pos()}]) -> {#ast_record{}, [{aeaci_lexer:lex_token(), aeaci_lexer:pos()}]}.
+-spec parse_record(token_list()) -> {#ast_record{}, token_list()}.
 parse_record([{record_end, _} | Tokens]) ->
     {#ast_record{data = []}, Tokens};
 parse_record([{comma, _} | Tokens]) ->
@@ -145,7 +146,7 @@ parse_record(Tokens1) ->
     {#ast_record{data = Data}, Tokens3} = parse_record(Tokens2),
     {#ast_record{data = [NamedArgAst | Data]}, Tokens3}.
 
--spec parse_named_arg([{aeaci_lexer:lex_token(), aeaci_lexer:pos()}]) -> {#ast_named_arg{}, [{aeaci_lexer:lex_token(), aeaci_lexer:pos()}]}.
+-spec parse_named_arg(token_list()) -> {#ast_named_arg{}, token_list()}.
 parse_named_arg(Tokens1) ->
     {#ast_id{namespace = []} = Name, [{equal, _} | Tokens2]} = parse_id_or_con(Tokens1),
     {LiteralAst, Tokens3} = parse_literal(Tokens2),
