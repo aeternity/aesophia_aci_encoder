@@ -12,6 +12,7 @@
         //, {"call": "test(C)", "calldata": "cb_KxGSiyA2G6+CAAEAP/3zGaw="}
         //, {"call": "test(D(20))", "calldata": "cb_KxGSiyA2G6+CAAEBGyitaVpd"}
         , {"call": "test(#20)", "calldata": "cb_KxGSiyA2G58BBSCeiZGu"}
+        , {"call": "test({[1] = true, [2] = false, [3] = true, [4] = false})", "calldata": "cb_KxGSiyA2Gy8EAv8Efwb/CH/KWUZi"}
         ]
       }
     }

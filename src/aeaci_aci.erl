@@ -387,8 +387,8 @@ fate_type_inference(#ast_tuple{args = Types}) ->
 fate_type_inference(#ast_map{data = Map}) ->
     Keys = maps:keys(Map),
     Values = maps:values(Map),
-    KT = fate_type_inference(#ast_list{args = Keys}),
-    VT = fate_type_inference(#ast_list{args = Values}),
+    {list, KT} = fate_type_inference(#ast_list{args = Keys}),
+    {list, VT} = fate_type_inference(#ast_list{args = Values}),
     {map, KT, VT};
 fate_type_inference(#ast_record{}) ->
     io:format(user, "Polimorphism on records is currently unsupported", []),

@@ -1,0 +1,11 @@
+contract Remote =
+    record d = {z: string}
+    datatype test = A | B(int)
+
+contract Test = 
+    datatype test2 = C | D(int)
+    record a = {x: int}
+    record b('a) = {x: 'a}
+    record c = {y: int}
+    entrypoint test(a: 'a) = a
+
