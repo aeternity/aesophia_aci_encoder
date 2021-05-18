@@ -22,6 +22,7 @@
     | bool
     | {bytes, integer()}
     | bits %% It is impossible for a user to construct a literal of this type but leave it here just in case
+    | void
     | string
     | char
     | address
@@ -111,6 +112,7 @@ unfold_type(Env, ScopeName, TypeName) when is_binary(TypeName) ->
         [<<"int">>] -> int;
         [<<"signature">>] -> {bytes, 64};
         [<<"hash">>] -> {bytes, 32};
+        [<<"void">>] -> void;
         [<<"address">>] -> address;
         [<<"bits">>] -> bits;
         [<<"string">>] -> string;
