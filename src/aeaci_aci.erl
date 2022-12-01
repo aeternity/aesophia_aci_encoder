@@ -74,7 +74,7 @@ from_string(JText, Opts) ->
     Env3 = maybe_strip_typedefs(Env2, maps:get(strip, Opts, true)),
     #contract_aci{scopes = Env3, main_contract = Default, opts = Opts}.
 
-parse_contract(#{<<"contract">> := #{<<"name">> := ScopeName, <<"functions">> := F0, <<"type_defs">> := T0} = C}) ->
+parse_contract(#{<<"contract">> := #{<<"name">> := ScopeName, <<"functions">> := F0, <<"typedefs">> := T0} = C}) ->
     MkTDef = fun(N, T) -> #{<<"name">> => N, <<"vars">> => [], <<"typedef">> => T} end,
     T1 = [ MkTDef(<<"state">>, maps:get(<<"state">>, C)) || maps:is_key(<<"state">>, C) ] ++
          [ MkTDef(<<"event">>, maps:get(<<"event">>, C)) || maps:is_key(<<"event">>, C) ] ++ T0,
@@ -91,9 +91,13 @@ parse_contract(#{<<"contract">> := #{<<"name">> := ScopeName, <<"functions">> :=
                maps:put(<<"init">>, {[], <<"unit">>}, F2)
          end,
     {ScopeName, {#scope{typedefs = maps:from_list(ScopeTypes), functions = #{}, is_contract = true}, F3}};
-parse_contract(#{<<"namespace">> := #{<<"name">> := ScopeName, <<"type_defs">> := Ts}}) when Ts /= [] ->
+parse_contract(#{<<"namespace">> := #{<<"name">> := ScopeName, <<"typedefs">> := Ts}}) when Ts /= [] ->
     ScopeTypes = [{TypeName, {TypeDef, [V || #{<<"name">> := V} <- TypeVars]}} || #{<<"name">> := TypeName, <<"typedef">> := TypeDef, <<"vars">> := TypeVars} <- Ts],
     {ScopeName, {#scope{typedefs = maps:from_list(ScopeTypes), functions = #{}, is_contract = false}, #{}}};
+parse_contract(C = #{<<"contract">> := #{<<"type_defs">> := T0} = C0}) ->
+    parse_contract(C#{<<"contract">> => C0#{<<"typedefs">> => T0}});
+parse_contract(N = #{<<"namespace">> := #{<<"type_defs">> := T0} = N0}) ->
+    parse_contract(N#{<<"namespace">> => N0#{<<"typedefs">> => T0}});
 parse_contract(#{<<"namespace">> := _}) ->
     skip.
 
@@ -150,6 +154,11 @@ unfold_type(Env, ScopeName, TypeName) when is_binary(TypeName) ->
         [<<"AENS">>, <<"pointee">>] ->
             pointee_t();
         [<<"AENS">>, <<"name">>] ->
+            {variant, [{"Name", [address, ttl_t(), {map, string, pointee_t()}]}]};
+        % AENSv2 types
+        [<<"AENSv2">>, <<"pointee">>] ->
+            pointee_t();
+        [<<"AENSv2">>, <<"name">>] ->
             {variant, [{"Name", [address, ttl_t(), {map, string, pointee_t()}]}]};
         %% Fancy crypto primitives
         [<<"MCL_BLS12_381">>, <<"fr">>] -> {bytes, 32};
