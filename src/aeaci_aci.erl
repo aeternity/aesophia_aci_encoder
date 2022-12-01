@@ -155,6 +155,11 @@ unfold_type(Env, ScopeName, TypeName) when is_binary(TypeName) ->
             pointee_t();
         [<<"AENS">>, <<"name">>] ->
             {variant, [{"Name", [address, ttl_t(), {map, string, pointee_t()}]}]};
+        % AENSv2 types
+        [<<"AENSv2">>, <<"pointee">>] ->
+            pointee_t();
+        [<<"AENSv2">>, <<"name">>] ->
+            {variant, [{"Name", [address, ttl_t(), {map, string, pointee_t()}]}]};
         %% Fancy crypto primitives
         [<<"MCL_BLS12_381">>, <<"fr">>] -> {bytes, 32};
         [<<"MCL_BLS12_381">>, <<"fp">>] -> {bytes, 48};
