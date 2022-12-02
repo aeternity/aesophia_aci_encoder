@@ -96,7 +96,7 @@ parse_contract(#{<<"namespace">> := #{<<"name">> := ScopeName, <<"typedefs">> :=
     {ScopeName, {#scope{typedefs = maps:from_list(ScopeTypes), functions = #{}, is_contract = false}, #{}}};
 parse_contract(C = #{<<"contract">> := #{<<"type_defs">> := T0} = C0}) ->
     parse_contract(C#{<<"contract">> => C0#{<<"typedefs">> => T0}});
-parse_contract(N = #{<<"namespace">> := #{<<"type_defs">> := T0} = N0}) ->
+parse_contract(N = #{<<"namespace">> := #{<<"type_defs">> := T0} = N0}) when T0 /= [] ->
     parse_contract(N#{<<"namespace">> => N0#{<<"typedefs">> => T0}});
 parse_contract(#{<<"namespace">> := _}) ->
     skip.
