@@ -346,6 +346,9 @@ type_encode_fate({map, KT, VT}, #ast_map{data = Data}) ->
         ));
 type_encode_fate({bytes, Size}, #ast_bytes{val = Binary}) when byte_size(Binary) =:= Size ->
     aeb_fate_data:make_bytes(Binary);
+type_encode_fate({record, [{_, T}]}, #ast_record{data = [#ast_named_arg{value = Arg}]}) ->
+    %% Singleton records are automatically unboxed
+    type_encode_fate(T, Arg);
 type_encode_fate({record, Defs}, #ast_record{data = NamedArgs}) when length(Defs) =:= length(NamedArgs) ->
     ArgsMap = maps:from_list([{list_to_binary(Name), Val} || #ast_named_arg{name = #ast_id{namespace = [], id = Name}, value = Val} <- NamedArgs]),
     true = map_size(ArgsMap) =:= length(Defs),
