@@ -20,7 +20,7 @@
 -type aci_typedef() ::
     int
     | bool
-    | {bytes, integer()}
+    | {bytes, integer() | binary()}
     | bits %% It is impossible for a user to construct a literal of this type but leave it here just in case
     | void
     | string
@@ -345,6 +345,8 @@ type_encode_fate({map, KT, VT}, #ast_map{data = Data}) ->
             || {K, V} <- maps:to_list(Data)]
         ));
 type_encode_fate({bytes, Size}, #ast_bytes{val = Binary}) when byte_size(Binary) =:= Size ->
+    aeb_fate_data:make_bytes(Binary);
+type_encode_fate({bytes, <<"any">>}, #ast_bytes{val = Binary}) ->
     aeb_fate_data:make_bytes(Binary);
 type_encode_fate({record, [{_, T}]}, #ast_record{data = [#ast_named_arg{value = Arg}]}) ->
     %% Singleton records are automatically unboxed
